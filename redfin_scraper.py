@@ -91,19 +91,78 @@ def extract_street(card_addr: str | None, url_href: str) -> str:
     raw = re.sub(r"\s\d{5}$", "", raw)
     return raw.strip()
 
-def fetch_redfin_streets() -> list[str]:
+def fetch_redfin_properties() -> list[dict]:
+    """Fetch Redfin properties with address and square footage."""
     html = requests.get(RDFN_URL, headers=HDRS, timeout=30).text
     soup = BeautifulSoup(html, "html.parser")
-    streets = []
+    properties = []
+    
     for card in soup.select("div.HomeCardContainer"):
-        a    = card.find("a", href=True)
+        a = card.find("a", href=True)
         disp = card.select_one("div.homeAddressV2")
         if not a:
             continue
+        
         street = extract_street(disp.text if disp else None, a["href"])
-        if street:
-            streets.append(street)
-    return streets
+        if not street:
+            continue
+            
+        # Extract square footage from various possible selectors
+        sqft = 0
+        sqft_selectors = [
+            "div.stats span:contains('Sq Ft')",
+            "div.homeStatsV2 span:contains('Sq Ft')", 
+            "div.HomeStatsV2 span:contains('Sq Ft')",
+            "span.sqft-value",
+            "span.value:contains('Sq Ft')",
+            "[data-rf-test-id='abp-sqFt']",
+            ".sqft"
+        ]
+        
+        # Try different patterns for square footage
+        for selector in sqft_selectors:
+            try:
+                sqft_elem = card.select_one(selector)
+                if sqft_elem:
+                    sqft_text = sqft_elem.get_text()
+                    # Extract number from text like "1,920 Sq Ft" or "1920"
+                    sqft_match = re.search(r'([\d,]+)', sqft_text)
+                    if sqft_match:
+                        sqft = int(sqft_match.group(1).replace(',', ''))
+                        break
+            except:
+                continue
+        
+        # If no specific sqft selector worked, try searching the entire card text
+        if sqft == 0:
+            card_text = card.get_text()
+            # Look for patterns like "1,920 Sq Ft", "1920 sqft", etc.
+            sqft_patterns = [
+                r'([\d,]+)\s*[Ss]q\s*[Ff]t',
+                r'([\d,]+)\s*[Ss]quare\s*[Ff]eet',
+                r'([\d,]+)\s*SF\b'
+            ]
+            
+            for pattern in sqft_patterns:
+                match = re.search(pattern, card_text)
+                if match:
+                    try:
+                        sqft = int(match.group(1).replace(',', ''))
+                        break
+                    except ValueError:
+                        continue
+        
+        properties.append({
+            'street': street,
+            'sqft': sqft
+        })
+    
+    return properties
+
+def fetch_redfin_streets() -> list[str]:
+    """Legacy function - returns just street names for backwards compatibility."""
+    properties = fetch_redfin_properties()
+    return [prop['street'] for prop in properties]
 
 def arcgis_pid(street: str) -> str | None:
     params = {
@@ -172,13 +231,12 @@ def extract_unique_lot_numbers(text: str) -> set[str]:
     
     return lot_numbers
 
-def enhanced_kw_counts(text: str) -> dict[str,int]:
+def enhanced_kw_counts(text: str, sqft: int = 0) -> dict[str,int]:
     """Enhanced keyword counting with improved lot number handling per Aaron's requirements."""
     up = text.upper()
     counts = {}
     
-    # Extract square footage and check for RANCH
-    sqft = extract_square_footage(text)
+    # Use provided square footage and check for RANCH
     has_ranch = "RANCH" in up
     has_1500_plus = sqft >= 1500
     
@@ -707,16 +765,19 @@ def main():
     ap.add_argument("--ranch-min-sqft", type=int, default=1500, help="minimum square footage for Ranch search (default: 1500)")
     args = ap.parse_args()
 
-    # Fetch Redfin properties
-    streets = fetch_redfin_streets()
+    # Fetch Redfin properties with square footage
+    properties = fetch_redfin_properties()
     if args.limit:
-        streets = streets[:args.limit]
-        logging.info("Limiting to %d properties", len(streets))
+        properties = properties[:args.limit]
+        logging.info("Limiting to %d properties", len(properties))
 
     rows = []
     skipped_count = 0
-    for i, street in enumerate(streets,1):
-        logging.info("[%d/%d] %s", i, len(streets), street)
+    for i, prop in enumerate(properties,1):
+        street = prop['street']
+        redfin_sqft = prop['sqft']
+        logging.info("[%d/%d] %s (Redfin: %d sqft)", i, len(properties), street, redfin_sqft)
+        
         pid = arcgis_pid(street)
         if not pid:
             continue
@@ -735,17 +796,14 @@ def main():
             skipped_count += 1
             logging.info("→ Skipped (contains short/long plat): %s", street)
             continue
-            
-        # Extract square footage for the new sqft column
-        sqft = extract_square_footage(full_text)
         
         rows.append({
             "street": street,
             "pid": pid,
             "legal_description": legal_desc,
-            "sqft": sqft,
+            "sqft": redfin_sqft,  # Use square footage from Redfin
             "full_page_text": full_text,
-            **enhanced_kw_counts(full_text)  # Use full_text instead of legal_desc for keyword analysis
+            **enhanced_kw_counts(full_text, redfin_sqft)  # Pass Redfin sqft to keyword analysis
         })
         time.sleep(0.3)   # polite throttle
     
