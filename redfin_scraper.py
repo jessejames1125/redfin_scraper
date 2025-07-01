@@ -278,40 +278,37 @@ def enhanced_kw_counts(text: str, sqft: int = 0) -> dict[str,int]:
     return counts
 
 def search_scout_ranch_properties(min_sqft: int = 1500) -> list[dict]:
-    """Search SCOUT for properties containing 'Ranch' anywhere in the record with square footage > min_sqft."""
-    params = {
-        "f": "json",
-        "where": f"(legal_description LIKE '%RANCH%' OR site_address LIKE '%RANCH%' OR owner_name LIKE '%RANCH%') AND sqft > {min_sqft}",
-        "outFields": "PID_NUM,site_address,legal_description,sqft,owner_name",
-        "returnGeometry": "false",
-        "resultRecordCount": 1000  # Limit results
-    }
-    
-    try:
-        response = requests.get(SCOUT_SEARCH_URL, params=params, timeout=30)
-        js = response.json()
-        features = js.get("features", [])
-        
-        results = []
-        for feature in features:
-            attrs = feature.get("attributes", {})
-            results.append({
-                "pid": attrs.get("PID_NUM"),
-                "address": attrs.get("site_address"),
-                "legal_description": attrs.get("legal_description"),
-                "sqft": attrs.get("sqft"),
-                "owner_name": attrs.get("owner_name"),
-                "ranch_match_type": "Legal Desc" if "RANCH" in str(attrs.get("legal_description", "")).upper() else 
-                                   "Address" if "RANCH" in str(attrs.get("site_address", "")).upper() else
-                                   "Owner" if "RANCH" in str(attrs.get("owner_name", "")).upper() else "Other"
-            })
-        
-        logging.info("Found %d Ranch properties >%d sqft", len(results), min_sqft)
-        return results
-        
-    except Exception as e:
-        logging.error("Error searching Scout for Ranch properties: %s", str(e))
-        return []
+    """Stubbed: Ranch search is currently disabled."""
+    # Disabled ranch search functionality
+    # params = {
+    #     "f": "json",
+    #     "where": f"(legal_description LIKE '%RANCH%' OR site_address LIKE '%RANCH%' OR owner_name LIKE '%RANCH%') AND sqft > {min_sqft}",
+    #     "outFields": "PID_NUM,site_address,legal_description,sqft,owner_name",
+    #     "returnGeometry": "false",
+    #     "resultRecordCount": 1000  # Limit results
+    # }
+    # try:
+    #     response = requests.get(SCOUT_SEARCH_URL, params=params, timeout=30)
+    #     js = response.json()
+    #     features = js.get("features", [])
+    #     results = []
+    #     for feature in features:
+    #         attrs = feature.get("attributes", {})
+    #         results.append({
+    #             "pid": attrs.get("PID_NUM"),
+    #             "address": attrs.get("site_address"),
+    #             "legal_description": attrs.get("legal_description"),
+    #             "sqft": attrs.get("sqft"),
+    #             "owner_name": attrs.get("owner_name"),
+    #             "ranch_match_type": "Legal Desc" if "RANCH" in str(attrs.get("legal_description", "")).upper() else 
+    #                                "Address" if "RANCH" in str(attrs.get("site_address", "")).upper() else
+    #                                "Owner" if "RANCH" in str(attrs.get("owner_name", "")).upper() else "Other"
+    #         })
+    #     logging.info("Found %d Ranch properties >%d sqft", len(results), min_sqft)
+    #     return results
+    # except Exception as e:
+    #     logging.error("Error searching Scout for Ranch properties: %s", str(e))
+    return []
 
 def create_keyword_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Create a summary of only properties with non-zero keyword counts."""
