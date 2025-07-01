@@ -29,6 +29,7 @@ jobs:
       env:
         GMAIL_EMAIL: ${{ secrets.GMAIL_EMAIL }}
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        FORWARDING_EMAIL: ${{ secrets.FORWARDING_EMAIL }}
       run: |
         python redfin_scraper.py --send-email --provider gmail
         

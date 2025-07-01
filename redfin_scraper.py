@@ -66,7 +66,7 @@ SCOUT_SEARCH_URL = ("https://gismo.spokanecounty.org/arcgis/rest/services/"
                    "SCOUT/PropertyLookup/MapServer/0/query")
 
 # Email configuration
-EMAIL_RECIPIENT = "jessejames1125@gmail.com"
+EMAIL_RECIPIENT = os.getenv('FORWARDING_EMAIL') or os.getenv('GMAIL_EMAIL') or 'your@email.com'
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
