@@ -8,10 +8,12 @@ redfin_spokane_to_scout.py
 • Email results with Excel and PDF attachments
 
 USAGE EXAMPLES:
-  python redfin_scraper2.py                    # Creates HTML email preview (safe test mode)
-  python redfin_scraper2.py --send-email       # Actually sends email (requires setup)
-  python redfin_scraper2.py --no-email         # Just creates files, no email
-  python redfin_scraper2.py --send-email --provider outlook  # Use different email provider
+  python redfin_scraper.py                     # Creates HTML email preview (safe test mode)
+  python redfin_scraper.py --send-email        # Actually sends email (requires setup)
+  python redfin_scraper.py --no-email          # Just creates files, no email
+  python redfin_scraper.py --send-email --provider outlook  # Use different email provider
+  python redfin_scraper.py --search-ranch      # Search for Ranch properties >1500 sqft
+  python redfin_scraper.py --search-ranch --ranch-min-sqft 2000  # Custom sqft threshold
 
 EMAIL SETUP:
   For Outlook/Hotmail (easiest): set EMAIL_ADDRESS=you@outlook.com & EMAIL_PASSWORD=yourpassword
@@ -55,8 +57,13 @@ SCOUT_SUMMARY = ("https://cp.spokanecounty.org/SCOUT/propertyinformation/"
 # capture strings like "FAIRWOOD CREST NO 4 L23 B2"
 LEGAL_RE_HTML = re.compile(r">\s*([A-Z0-9 ]+ L\d{1,2} B\d+)\s*<")
 
-KEYWORDS_BASE = [" LT","LTS"," L ","LOTS","THRU","TO","AND","ALL","THROUGH","-","&"]
+# Updated keywords per Aaron's requirements
+KEYWORDS_BASE = [" LT","LTS"," L ","LOTS","THRU"," TO ","AND","ALL","THROUGH","&"]
 KEYWORDS      = KEYWORDS_BASE + [f"L{i}" for i in range(100)]   # L0 … L99
+
+# Additional Scout search functionality
+SCOUT_SEARCH_URL = ("https://gismo.spokanecounty.org/arcgis/rest/services/"
+                   "SCOUT/PropertyLookup/MapServer/0/query")
 
 # Email configuration
 EMAIL_RECIPIENT = "jessejames1125@gmail.com"
@@ -118,9 +125,93 @@ def legal_for_pid(pid: str) -> tuple[str, str]:
     text = BeautifulSoup(html, "html.parser").get_text(separator="\n")
     return text, html
 
-def kw_counts(text: str) -> dict[str,int]:
+def should_skip_property(legal_desc: str) -> bool:
+    """Check if property should be skipped based on Aaron's filter criteria."""
+    upper_desc = legal_desc.upper()
+    return "SHORT PLAT" in upper_desc or "LONG PLAT" in upper_desc
+
+def extract_unique_lot_numbers(text: str) -> set[str]:
+    """Extract unique lot numbers from text, handling L-, L , and L& patterns."""
+    upper_text = text.upper()
+    lot_numbers = set()
+    
+    # Pattern to match lot numbers with various separators
+    # Matches: L1, L-1, L 1, L&1, etc.
+    lot_pattern = re.compile(r'\bL[-\s&]*(\d{1,2})\b')
+    
+    for match in lot_pattern.finditer(upper_text):
+        lot_num = match.group(1)
+        lot_numbers.add(f"L{lot_num}")
+    
+    return lot_numbers
+
+def enhanced_kw_counts(text: str) -> dict[str,int]:
+    """Enhanced keyword counting with improved lot number handling per Aaron's requirements."""
     up = text.upper()
-    return {k: up.count(k) for k in KEYWORDS}
+    counts = {}
+    
+    # Handle regular keywords (non-lot numbers)
+    for keyword in KEYWORDS_BASE:
+        if keyword == " TO ":
+            # Ensure "TO" has spaces on both sides
+            counts["TO"] = up.count(keyword)
+        elif keyword == "&":
+            # Count & symbols, but be careful with lot contexts
+            counts[keyword] = up.count(keyword)
+        else:
+            counts[keyword] = up.count(keyword)
+    
+    # Handle lot numbers with deduplication
+    unique_lots = extract_unique_lot_numbers(text)
+    
+    # Initialize all lot counts to 0
+    for i in range(100):
+        lot_key = f"L{i}"
+        counts[lot_key] = 0
+    
+    # Count each unique lot number only once
+    for lot in unique_lots:
+        if lot in counts:
+            counts[lot] = 1
+    
+    # Handle dash context - only count when next to L
+    dash_with_l_pattern = re.compile(r'L[-\s]*\d+')
+    dash_matches = len(dash_with_l_pattern.findall(up))
+    counts["-"] = dash_matches
+    
+    return counts
+
+def search_scout_ranch_properties(min_sqft: int = 1500) -> list[dict]:
+    """Search SCOUT for properties containing 'Ranch' with square footage > min_sqft."""
+    params = {
+        "f": "json",
+        "where": f"legal_description LIKE '%RANCH%' AND sqft > {min_sqft}",
+        "outFields": "PID_NUM,site_address,legal_description,sqft",
+        "returnGeometry": "false",
+        "resultRecordCount": 1000  # Limit results
+    }
+    
+    try:
+        response = requests.get(SCOUT_SEARCH_URL, params=params, timeout=30)
+        js = response.json()
+        features = js.get("features", [])
+        
+        results = []
+        for feature in features:
+            attrs = feature.get("attributes", {})
+            results.append({
+                "pid": attrs.get("PID_NUM"),
+                "address": attrs.get("site_address"),
+                "legal_description": attrs.get("legal_description"),
+                "sqft": attrs.get("sqft")
+            })
+        
+        logging.info("Found %d Ranch properties >%d sqft", len(results), min_sqft)
+        return results
+        
+    except Exception as e:
+        logging.error("Error searching Scout for Ranch properties: %s", str(e))
+        return []
 
 def create_keyword_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Create a summary of only properties with non-zero keyword counts."""
@@ -540,7 +631,22 @@ def main():
     ap.add_argument("--send-email", action="store_true", help="force send real email (overrides test mode)")
     ap.add_argument("--provider", choices=['gmail', 'outlook', 'yahoo', 'aol'], default='gmail',
                     help="email provider to use (default: gmail)")
+    ap.add_argument("--search-ranch", action="store_true", help="search for Ranch properties >1500 sqft instead of regular scraping")
+    ap.add_argument("--ranch-min-sqft", type=int, default=1500, help="minimum square footage for Ranch search (default: 1500)")
     args = ap.parse_args()
+
+    # Handle Ranch property search as separate functionality
+    if args.search_ranch:
+        ranch_results = search_scout_ranch_properties(args.ranch_min_sqft)
+        if ranch_results:
+            ranch_df = pd.DataFrame(ranch_results)
+            batch_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            ranch_out = Path(f"ranch_properties_{batch_id}.xlsx")
+            ranch_df.to_excel(ranch_out, index=False)
+            logging.info("Saved %d Ranch properties to %s", len(ranch_results), ranch_out)
+        else:
+            logging.info("No Ranch properties found matching criteria")
+        return
 
     streets = fetch_redfin_streets()
     if args.limit:
@@ -548,6 +654,7 @@ def main():
         logging.info("Limiting to %d properties", len(streets))
 
     rows = []
+    skipped_count = 0
     for i, street in enumerate(streets,1):
         logging.info("[%d/%d] %s", i, len(streets), street)
         pid = arcgis_pid(street)
@@ -562,14 +669,24 @@ def main():
             legal_desc = full_text[start:end].strip()
         except ValueError:
             legal_desc = full_text.strip()
+        
+        # Apply Aaron's filter: skip short plat and long plat properties
+        if should_skip_property(legal_desc):
+            skipped_count += 1
+            logging.info("→ Skipped (contains short/long plat): %s", street)
+            continue
+            
         rows.append({
             "street": street,
             "pid": pid,
             "legal_description": legal_desc,
             "full_page_text": full_text,
-            **kw_counts(legal_desc)
+            **enhanced_kw_counts(legal_desc)
         })
         time.sleep(0.3)   # polite throttle
+    
+    if skipped_count > 0:
+        logging.info("Skipped %d properties containing short/long plat", skipped_count)
 
     if not rows:
         logging.error("No data collected; exiting.")
