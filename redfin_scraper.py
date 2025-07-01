@@ -539,6 +539,12 @@ def send_email(excel_path: Path, pdf_path: Path, stats_summary: dict, email_prov
     sender_email = os.getenv('EMAIL_ADDRESS') or os.getenv('GMAIL_EMAIL')
     sender_password = os.getenv('EMAIL_PASSWORD') or os.getenv('GMAIL_APP_PASSWORD')
     
+    # Debug logging for recipient
+    recipient = EMAIL_RECIPIENT
+    masked_recipient = recipient[:3] + "***" + recipient[-10:] if len(recipient) > 13 else "***"
+    logging.info("📧 Attempting to send email to: %s", masked_recipient)
+    logging.info("📧 Using sender email: %s", sender_email[:3] + "***" + sender_email[-10:] if sender_email and len(sender_email) > 13 else "***")
+    
     if not sender_email or not sender_password:
         logging.error("Email credentials not found.")
         logging.info("EASY SETUP OPTIONS:")
@@ -568,6 +574,8 @@ def send_email(excel_path: Path, pdf_path: Path, stats_summary: dict, email_prov
         msg['To'] = EMAIL_RECIPIENT
         msg['Subject'] = f"Spokane Real Estate Scout Results - {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
         
+        logging.info("📧 Email subject: %s", msg['Subject'])
+        
         # Email body
         body = f"""
 Hello!
@@ -591,6 +599,7 @@ Your Real Estate Bot Assistant 🏠
         msg.attach(MIMEText(body, 'plain'))
         
         # Attach Excel file
+        logging.info("📎 Attaching Excel file: %s", excel_path.name)
         with open(excel_path, "rb") as attachment:
             part = MIMEBase('application', 'octet-stream')
             part.set_payload(attachment.read())
@@ -599,6 +608,7 @@ Your Real Estate Bot Assistant 🏠
             msg.attach(part)
         
         # Attach PDF file
+        logging.info("📎 Attaching PDF file: %s", pdf_path.name)
         with open(pdf_path, "rb") as attachment:
             part = MIMEBase('application', 'octet-stream')
             part.set_payload(attachment.read())
@@ -607,14 +617,17 @@ Your Real Estate Bot Assistant 🏠
             msg.attach(part)
         
         # Send email using provider-specific settings
+        logging.info("🔄 Connecting to %s (%s:%s)", email_provider, provider_config['smtp'], provider_config['port'])
         server = smtplib.SMTP(provider_config['smtp'], provider_config['port'])
         server.starttls()
+        logging.info("🔐 Logging in to email server...")
         server.login(sender_email, sender_password)
         text = msg.as_string()
+        logging.info("📤 Sending email...")
         server.sendmail(sender_email, EMAIL_RECIPIENT, text)
         server.quit()
         
-        logging.info("Email sent successfully to %s via %s", EMAIL_RECIPIENT, email_provider)
+        logging.info("Email sent successfully to %s via %s", masked_recipient, email_provider)
         return True
         
     except Exception as e:
