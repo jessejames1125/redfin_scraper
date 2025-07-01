@@ -58,7 +58,7 @@ SCOUT_SUMMARY = ("https://cp.spokanecounty.org/SCOUT/propertyinformation/"
 LEGAL_RE_HTML = re.compile(r">\s*([A-Z0-9 ]+ L\d{1,2} B\d+)\s*<")
 
 # Updated keywords per Aaron's requirements
-KEYWORDS_BASE = [" LT","LTS"," L ","LOTS","THRU"," TO ","AND","ALL","THROUGH","&"]
+KEYWORDS_BASE = [" LT","LTS"," L ","LOTS","THRU"," TO ","AND","ALL","THROUGH","&",">=1500","RANCH",">=1500&RANCH"]
 KEYWORDS      = KEYWORDS_BASE + [f"L{i}" for i in range(100)]   # L0 … L99
 
 # Additional Scout search functionality
@@ -129,6 +129,34 @@ def should_skip_property(legal_desc: str) -> bool:
     upper_desc = legal_desc.upper()
     return "SHORT PLAT" in upper_desc or "LONG PLAT" in upper_desc
 
+def extract_square_footage(text: str) -> int:
+    """Extract square footage from SCOUT full page text."""
+    # Pattern to match "Dwelling YEAR SQFT NA SF" format
+    # Example: "Dwelling 1959 1,920 NA SF" -> extracts 1920
+    dwelling_pattern = re.compile(r'Dwelling\s+\d{4}\s+([\d,]+)\s+NA\s+SF', re.IGNORECASE)
+    match = dwelling_pattern.search(text)
+    
+    if match:
+        sqft_str = match.group(1).replace(',', '')  # Remove commas
+        try:
+            return int(sqft_str)
+        except ValueError:
+            pass
+    
+    # Fallback pattern for "Gross Living Area" if the above doesn't work
+    # Look for patterns like "Gross Living Area 1,920"
+    gross_pattern = re.compile(r'Gross\s+Living\s+Area\s+([\d,]+)', re.IGNORECASE)
+    match = gross_pattern.search(text)
+    
+    if match:
+        sqft_str = match.group(1).replace(',', '')
+        try:
+            return int(sqft_str)
+        except ValueError:
+            pass
+    
+    return 0  # Return 0 if no square footage found
+
 def extract_unique_lot_numbers(text: str) -> set[str]:
     """Extract unique lot numbers from text, handling L-, L , and L& patterns."""
     upper_text = text.upper()
@@ -149,8 +177,14 @@ def enhanced_kw_counts(text: str) -> dict[str,int]:
     up = text.upper()
     counts = {}
     
-    # Handle regular keywords (non-lot numbers)
-    for keyword in KEYWORDS_BASE:
+    # Extract square footage and check for RANCH
+    sqft = extract_square_footage(text)
+    has_ranch = "RANCH" in up
+    has_1500_plus = sqft >= 1500
+    
+    # Handle regular keywords (non-lot numbers, non-special)
+    regular_keywords = [" LT","LTS"," L ","LOTS","THRU"," TO ","AND","ALL","THROUGH","&"]
+    for keyword in regular_keywords:
         if keyword == " TO ":
             # Ensure "TO" has spaces on both sides
             counts["TO"] = up.count(keyword)
@@ -159,6 +193,11 @@ def enhanced_kw_counts(text: str) -> dict[str,int]:
             counts[keyword] = up.count(keyword)
         else:
             counts[keyword] = up.count(keyword)
+    
+    # Handle special keywords
+    counts[">=1500"] = 1 if has_1500_plus else 0
+    counts["RANCH"] = 1 if has_ranch else 0
+    counts[">=1500&RANCH"] = 1 if (has_1500_plus and has_ranch) else 0
     
     # Handle lot numbers with deduplication
     unique_lots = extract_unique_lot_numbers(text)
@@ -181,11 +220,11 @@ def enhanced_kw_counts(text: str) -> dict[str,int]:
     return counts
 
 def search_scout_ranch_properties(min_sqft: int = 1500) -> list[dict]:
-    """Search SCOUT for properties containing 'Ranch' with square footage > min_sqft."""
+    """Search SCOUT for properties containing 'Ranch' anywhere in the record with square footage > min_sqft."""
     params = {
         "f": "json",
-        "where": f"legal_description LIKE '%RANCH%' AND sqft > {min_sqft}",
-        "outFields": "PID_NUM,site_address,legal_description,sqft",
+        "where": f"(legal_description LIKE '%RANCH%' OR site_address LIKE '%RANCH%' OR owner_name LIKE '%RANCH%') AND sqft > {min_sqft}",
+        "outFields": "PID_NUM,site_address,legal_description,sqft,owner_name",
         "returnGeometry": "false",
         "resultRecordCount": 1000  # Limit results
     }
@@ -202,7 +241,11 @@ def search_scout_ranch_properties(min_sqft: int = 1500) -> list[dict]:
                 "pid": attrs.get("PID_NUM"),
                 "address": attrs.get("site_address"),
                 "legal_description": attrs.get("legal_description"),
-                "sqft": attrs.get("sqft")
+                "sqft": attrs.get("sqft"),
+                "owner_name": attrs.get("owner_name"),
+                "ranch_match_type": "Legal Desc" if "RANCH" in str(attrs.get("legal_description", "")).upper() else 
+                                   "Address" if "RANCH" in str(attrs.get("site_address", "")).upper() else
+                                   "Owner" if "RANCH" in str(attrs.get("owner_name", "")).upper() else "Other"
             })
         
         logging.info("Found %d Ranch properties >%d sqft", len(results), min_sqft)
@@ -496,6 +539,7 @@ def create_test_email_file(excel_path: Path, pdf_path: Path, stats_summary: dict
                         <li>• Properties with keywords: {stats_summary.get('properties_with_keywords', 'N/A')}</li>
                         <li>• Unique keywords found: {stats_summary.get('unique_keywords', 'N/A')}</li>
                         <li>• Properties with lot numbers: {stats_summary.get('properties_with_lots', 'N/A')}</li>
+                        <li>• Ranch properties found: {stats_summary.get('ranch_properties', 'N/A')}</li>
                     </ul>
                 </div>
                 
@@ -602,9 +646,10 @@ SUMMARY:
 • Properties with keywords: {stats_summary.get('properties_with_keywords', 'N/A')}
 • Unique keywords found: {stats_summary.get('unique_keywords', 'N/A')}
 • Properties with lot numbers: {stats_summary.get('properties_with_lots', 'N/A')}
+• Ranch properties found: {stats_summary.get('ranch_properties', 'N/A')}
 
 Attachments:
-📊 Excel file with 5 sheets: Raw Data, Keyword Summary, Keyword Stats, Lot Analysis, and Overview
+📊 Excel file with 6 sheets: Raw Data, Keyword Summary, Keyword Stats, Lot Analysis, Ranch Properties, and Overview
 📄 PDF report with key findings and visualizations
 
 Best regards,
@@ -659,23 +704,10 @@ def main():
     ap.add_argument("--send-email", action="store_true", help="force send real email (overrides test mode)")
     ap.add_argument("--provider", choices=['gmail', 'outlook', 'yahoo', 'aol'], default='gmail',
                     help="email provider to use (default: gmail)")
-    ap.add_argument("--search-ranch", action="store_true", help="search for Ranch properties >1500 sqft instead of regular scraping")
     ap.add_argument("--ranch-min-sqft", type=int, default=1500, help="minimum square footage for Ranch search (default: 1500)")
     args = ap.parse_args()
 
-    # Handle Ranch property search as separate functionality
-    if args.search_ranch:
-        ranch_results = search_scout_ranch_properties(args.ranch_min_sqft)
-        if ranch_results:
-            ranch_df = pd.DataFrame(ranch_results)
-            batch_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            ranch_out = Path(f"ranch_properties_{batch_id}.xlsx")
-            ranch_df.to_excel(ranch_out, index=False)
-            logging.info("Saved %d Ranch properties to %s", len(ranch_results), ranch_out)
-        else:
-            logging.info("No Ranch properties found matching criteria")
-        return
-
+    # Fetch Redfin properties
     streets = fetch_redfin_streets()
     if args.limit:
         streets = streets[:args.limit]
@@ -704,12 +736,16 @@ def main():
             logging.info("→ Skipped (contains short/long plat): %s", street)
             continue
             
+        # Extract square footage for the new sqft column
+        sqft = extract_square_footage(full_text)
+        
         rows.append({
             "street": street,
             "pid": pid,
             "legal_description": legal_desc,
+            "sqft": sqft,
             "full_page_text": full_text,
-            **enhanced_kw_counts(legal_desc)
+            **enhanced_kw_counts(full_text)  # Use full_text instead of legal_desc for keyword analysis
         })
         time.sleep(0.3)   # polite throttle
     
@@ -721,6 +757,12 @@ def main():
         sys.exit(1)
 
     df = pd.DataFrame(rows)
+    
+    # Search for Ranch properties automatically
+    logging.info("🏠 Searching for Ranch properties >%d sqft...", args.ranch_min_sqft)
+    ranch_results = search_scout_ranch_properties(args.ranch_min_sqft)
+    ranch_df = pd.DataFrame(ranch_results) if ranch_results else pd.DataFrame()
+    
     batch_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = Path(f"scout_results_{batch_id}.xlsx")
     pdf_out = Path(f"scout_results_{batch_id}.pdf")
@@ -737,6 +779,7 @@ def main():
         'Total Unique Keywords Found': len(stats_df) if not stats_df.empty else 0,
         'Most Common Keyword': stats_df.iloc[0]['keyword'] if not stats_df.empty else 'None',
         'Properties with Lot Numbers': len(lot_df) if not lot_df.empty else 0,
+        'Ranch Properties Found': len(ranch_df) if not ranch_df.empty else 0,
         'Date Generated': batch_id
     }
     
@@ -759,6 +802,11 @@ def main():
             lot_df.to_excel(writer, sheet_name='Lot Analysis', index=False)
             logging.info("Created Lot Analysis with %d properties", len(lot_df))
         
+        # Ranch Properties - Aaron's special search
+        if not ranch_df.empty:
+            ranch_df.to_excel(writer, sheet_name='Ranch Properties', index=False)
+            logging.info("Created Ranch Properties sheet with %d properties", len(ranch_df))
+        
         # Overview sheet
         overview_df = pd.DataFrame(list(overview_data.items()), columns=['Metric', 'Value'])
         overview_df.to_excel(writer, sheet_name='Overview', index=False)
@@ -774,7 +822,8 @@ def main():
             'total_properties': len(df),
             'properties_with_keywords': len(summary_df) if not summary_df.empty else 0,
             'unique_keywords': len(stats_df) if not stats_df.empty else 0,
-            'properties_with_lots': len(lot_df) if not lot_df.empty else 0
+            'properties_with_lots': len(lot_df) if not lot_df.empty else 0,
+            'ranch_properties': len(ranch_df) if not ranch_df.empty else 0
         }
         
         # Test email mode (default) or real email mode
