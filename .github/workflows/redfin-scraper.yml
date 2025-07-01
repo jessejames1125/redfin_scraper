@@ -27,10 +27,10 @@ jobs:
         
     - name: Run Redfin scraper
       env:
-        EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
-        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        GMAIL_EMAIL: ${{ secrets.GMAIL_EMAIL }}
+        GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       run: |
-        python redfin_scraper.py --send-email --provider outlook
+        python redfin_scraper.py --send-email --provider gmail
         
     - name: Upload artifacts on failure (for debugging)
       if: failure()
