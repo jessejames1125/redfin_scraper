@@ -66,7 +66,6 @@ SCOUT_SEARCH_URL = ("https://gismo.spokanecounty.org/arcgis/rest/services/"
                    "SCOUT/PropertyLookup/MapServer/0/query")
 
 # Email configuration
-EMAIL_RECIPIENT = os.getenv('FORWARDING_EMAIL') or os.getenv('GMAIL_EMAIL') or 'your@email.com'
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
@@ -539,10 +538,26 @@ def send_email(excel_path: Path, pdf_path: Path, stats_summary: dict, email_prov
     sender_email = os.getenv('EMAIL_ADDRESS') or os.getenv('GMAIL_EMAIL')
     sender_password = os.getenv('EMAIL_PASSWORD') or os.getenv('GMAIL_APP_PASSWORD')
     
-    # Debug logging for recipient
-    recipient = EMAIL_RECIPIENT
-    masked_recipient = recipient[:3] + "***" + recipient[-10:] if len(recipient) > 13 else "***"
-    logging.info("📧 Attempting to send email to: %s", masked_recipient)
+    # Build recipient list - send to both GMAIL_EMAIL and FORWARDING_EMAIL if both exist
+    recipients = []
+    gmail_email = os.getenv('GMAIL_EMAIL')
+    forwarding_email = os.getenv('FORWARDING_EMAIL')
+    
+    if forwarding_email:
+        recipients.append(forwarding_email)
+    if gmail_email and gmail_email != forwarding_email:  # Avoid duplicates
+        recipients.append(gmail_email)
+    
+    if not recipients:
+        recipients = ['your@email.com']  # Fallback
+    
+    # Debug logging for recipients
+    masked_recipients = []
+    for email in recipients:
+        masked = email[:3] + "***" + email[-10:] if len(email) > 13 else "***"
+        masked_recipients.append(masked)
+    
+    logging.info("📧 Attempting to send email to: %s", ', '.join(masked_recipients))
     logging.info("📧 Using sender email: %s", sender_email[:3] + "***" + sender_email[-10:] if sender_email and len(sender_email) > 13 else "***")
     
     if not sender_email or not sender_password:
@@ -571,7 +586,7 @@ def send_email(excel_path: Path, pdf_path: Path, stats_summary: dict, email_prov
         # Create message
         msg = MIMEMultipart()
         msg['From'] = sender_email
-        msg['To'] = EMAIL_RECIPIENT
+        msg['To'] = ', '.join(recipients)  # Multiple recipients
         msg['Subject'] = f"Spokane Real Estate Scout Results - {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"
         
         logging.info("📧 Email subject: %s", msg['Subject'])
@@ -624,10 +639,10 @@ Your Real Estate Bot Assistant 🏠
         server.login(sender_email, sender_password)
         text = msg.as_string()
         logging.info("📤 Sending email...")
-        server.sendmail(sender_email, EMAIL_RECIPIENT, text)
+        server.sendmail(sender_email, recipients, text)  # Send to multiple recipients
         server.quit()
         
-        logging.info("Email sent successfully to %s via %s", masked_recipient, email_provider)
+        logging.info("Email sent successfully to %s via %s", ', '.join(masked_recipients), email_provider)
         return True
         
     except Exception as e:
