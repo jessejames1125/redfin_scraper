@@ -12,8 +12,8 @@ USAGE EXAMPLES:
   python redfin_scraper.py --send-email        # Actually sends email (requires setup)
   python redfin_scraper.py --no-email          # Just creates files, no email
   python redfin_scraper.py --send-email --provider outlook  # Use different email provider
-  python redfin_scraper.py --search-ranch      # Search for Ranch properties >1500 sqft
-  python redfin_scraper.py --search-ranch --ranch-min-sqft 2000  # Custom sqft threshold
+  python redfin_scraper.py --schedule          # Run daily at 10am PST (24-hour automation)
+  python redfin_scraper.py --limit 10          # Process only first 10 properties (testing)
 
 EMAIL SETUP:
   For Outlook/Hotmail (easiest): set EMAIL_ADDRESS=you@outlook.com & EMAIL_PASSWORD=yourpassword
@@ -22,6 +22,8 @@ EMAIL SETUP:
 
 import argparse, datetime as dt, logging, re, sys, time, os
 import smtplib
+import schedule
+import pytz
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -64,7 +66,12 @@ SCOUT_SUMMARY = ("https://cp.spokanecounty.org/SCOUT/propertyinformation/"
 LEGAL_RE_HTML = re.compile(r">\s*([A-Z0-9 ]+ L\d{1,2} B\d+)\s*<")
 
 # Updated keywords per Aaron's requirements
-KEYWORDS_BASE = [" LT","LTS"," L ","LOTS","THRU"," TO ","AND","ALL","THROUGH","&",">=1500","RANCH",">=1500&RANCH"]
+KEYWORDS_BASE = [
+    " LT","LTS"," L ","LOTS","THRU"," TO ",
+    # "AND","ALL",  # Commented out - too dominant in results
+    "THROUGH","&",
+    # ">=1500","RANCH",">=1500&RANCH"  # Commented out - not needed for keyword analysis
+]
 KEYWORDS      = KEYWORDS_BASE + [f"L{i}" for i in range(100)]   # L0 … L99
 
 # Additional Scout search functionality
@@ -551,13 +558,8 @@ def enhanced_kw_counts(text: str, sqft: int = 0) -> dict[str,int]:
     up = text.upper()
     counts = {}
     
-    # Use provided square footage and check for RANCH
-    has_ranch = "RANCH" in up
-    has_1500_plus = sqft >= 1500
-    
-    # Handle regular keywords (non-lot numbers, non-special)
-    regular_keywords = [" LT","LTS"," L ","LOTS","THRU"," TO ","AND","ALL","THROUGH","&"]
-    for keyword in regular_keywords:
+    # Handle regular keywords from KEYWORDS_BASE (excluding commented out ones)
+    for keyword in KEYWORDS_BASE:
         if keyword == " TO ":
             # Ensure "TO" has spaces on both sides
             counts["TO"] = up.count(keyword)
@@ -566,11 +568,6 @@ def enhanced_kw_counts(text: str, sqft: int = 0) -> dict[str,int]:
             counts[keyword] = up.count(keyword)
         else:
             counts[keyword] = up.count(keyword)
-    
-    # Handle special keywords
-    counts[">=1500"] = 1 if has_1500_plus else 0
-    counts["RANCH"] = 1 if has_ranch else 0
-    counts[">=1500&RANCH"] = 1 if (has_1500_plus and has_ranch) else 0
     
     # Handle lot numbers with deduplication
     unique_lots = extract_unique_lot_numbers(text)
@@ -893,7 +890,7 @@ def create_test_email_file(excel_path: Path, pdf_path: Path, stats_summary: dict
         <div class="email-container">
             <div class="header">
                 <h2>📧 EMAIL PREVIEW - SPOKANE REAL ESTATE SCOUT</h2>
-                <p>To: {EMAIL_RECIPIENT}</p>
+                <p>To: Email Recipients</p>
                 <p>Subject: Spokane Real Estate Scout Results - {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
             </div>
             
@@ -1063,18 +1060,65 @@ Your Real Estate Bot Assistant 🏠
         logging.info("💡 Try different provider with --provider flag (outlook, yahoo, aol)")
         return False
 
-# ───── main ───────────────────────────────────────────────────────────────────
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("-n","--limit",type=int,help="max properties to process")
-    ap.add_argument("--no-email", action="store_true", help="skip sending email")
-    ap.add_argument("--test-email", action="store_true", help="create HTML preview instead of sending email")
-    ap.add_argument("--send-email", action="store_true", help="force send real email (overrides test mode)")
-    ap.add_argument("--provider", choices=['gmail', 'outlook', 'yahoo', 'aol'], default='gmail',
-                    help="email provider to use (default: gmail)")
-    ap.add_argument("--ranch-min-sqft", type=int, default=1500, help="minimum square footage for Ranch search (default: 1500)")
-    args = ap.parse_args()
+def run_daily_report():
+    """Run the daily report generation and email sending."""
+    logging.info("🕙 Running scheduled daily report at 10am PST...")
+    
+    # Create a mock args object for scheduled runs
+    class MockArgs:
+        limit = None
+        no_email = False
+        test_email = False
+        send_email = True  # Always send real emails in scheduled mode
+        provider = 'gmail'
+        ranch_min_sqft = 1500
+    
+    args = MockArgs()
+    
+    try:
+        # Run the main logic
+        run_main_logic(args)
+        logging.info("✅ Scheduled daily report completed successfully")
+    except Exception as e:
+        logging.error("❌ Scheduled daily report failed: %s", str(e))
 
+def should_run_today():
+    """Check if we should run today (skip weekends if desired)."""
+    today = dt.datetime.now()
+    # Run Monday through Friday (0=Monday, 6=Sunday)
+    return today.weekday() < 5  # Skip weekends
+
+def run_scheduler():
+    """Run the scheduling system."""
+    # Set up Pacific Time zone
+    pst = pytz.timezone('US/Pacific')
+    
+    logging.info("🕐 Starting email automation scheduler...")
+    logging.info("📅 Daily reports will be sent at 10:00 AM PST (Monday-Friday)")
+    logging.info("⏸️  Press Ctrl+C to stop the scheduler")
+    
+    # Schedule daily at 10 AM PST
+    schedule.every().day.at("10:00").do(run_daily_report)
+    
+    try:
+        while True:
+            # Check if we're in PST/PDT and adjust
+            now_pst = dt.datetime.now(pst)
+            schedule.run_pending()
+            
+            # Sleep for 1 minute between checks
+            time.sleep(60)
+            
+            # Log status every hour on the hour
+            if now_pst.minute == 0:
+                logging.info("🕐 Scheduler active - Next run: %s PST", 
+                           schedule.next_run().strftime('%Y-%m-%d %H:%M'))
+                
+    except KeyboardInterrupt:
+        logging.info("⏹️  Scheduler stopped by user")
+
+def run_main_logic(args):
+    """Extract the main logic so it can be called by both CLI and scheduler."""
     # Fetch Redfin properties with enhanced data
     properties = fetch_redfin_properties()
     if args.limit:
@@ -1144,7 +1188,7 @@ def main():
 
     if not rows:
         logging.error("No data collected; exiting.")
-        sys.exit(1)
+        return  # Don't sys.exit() in scheduler mode
 
     df = pd.DataFrame(rows)
     
@@ -1230,6 +1274,27 @@ def main():
                 logging.info("📧 Email preview created as fallback: %s", preview_path)
     else:
         logging.info("Email sending skipped. Files saved locally: %s, %s", out, pdf_out)
+
+# ───── main ───────────────────────────────────────────────────────────────────
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-n","--limit",type=int,help="max properties to process")
+    ap.add_argument("--no-email", action="store_true", help="skip sending email")
+    ap.add_argument("--test-email", action="store_true", help="create HTML preview instead of sending email")
+    ap.add_argument("--send-email", action="store_true", help="force send real email (overrides test mode)")
+    ap.add_argument("--provider", choices=['gmail', 'outlook', 'yahoo', 'aol'], default='gmail',
+                    help="email provider to use (default: gmail)")
+    ap.add_argument("--ranch-min-sqft", type=int, default=1500, help="minimum square footage for Ranch search (default: 1500)")
+    ap.add_argument("--schedule", action="store_true", help="run in scheduling mode - sends daily emails at 10am PST")
+    args = ap.parse_args()
+
+    # Check if running in scheduler mode
+    if args.schedule:
+        run_scheduler()
+        return
+
+    # Run once normally
+    run_main_logic(args)
 
 if __name__ == "__main__":
     main()
