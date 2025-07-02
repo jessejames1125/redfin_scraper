@@ -46,7 +46,13 @@ logging.basicConfig(
 
 # ───── constants ──────────────────────────────────────────────────────────────
 HDRS          = {"User-Agent": "Mozilla/5.0"}
-RDFN_URL      = "https://www.redfin.com/city/17154/WA/Spokane/filter/status=active"
+
+# Multiple Redfin URLs for different jurisdictions
+REDFIN_SOURCES = {
+    "Spokane City": "https://www.redfin.com/city/17154/WA/Spokane/filter/status=active",
+    "Spokane County": "https://www.redfin.com/county/1736/WA/Spokane-County/filter/status=active"
+}
+
 SLUG_RE       = re.compile(r"/WA/Spokane/([^/]+)/home")
 
 SCOUT_LAYER   = ("https://gismo.spokanecounty.org/arcgis/rest/services/"
@@ -91,73 +97,247 @@ def extract_street(card_addr: str | None, url_href: str) -> str:
     raw = re.sub(r"\s\d{5}$", "", raw)
     return raw.strip()
 
-def fetch_redfin_properties() -> list[dict]:
-    """Fetch Redfin properties with address and square footage."""
-    html = requests.get(RDFN_URL, headers=HDRS, timeout=30).text
-    soup = BeautifulSoup(html, "html.parser")
-    properties = []
+def extract_price_from_card(card) -> int:
+    """Extract price from Redfin property card."""
+    price_selectors = [
+        ".homecardV2Price",
+        ".price",
+        "[data-rf-test-id='abp-price']",
+        ".homePrice",
+        ".priceText"
+    ]
     
-    for card in soup.select("div.HomeCardContainer"):
-        a = card.find("a", href=True)
-        disp = card.select_one("div.homeAddressV2")
-        if not a:
+    for selector in price_selectors:
+        try:
+            price_elem = card.select_one(selector)
+            if price_elem:
+                price_text = price_elem.get_text()
+                # Extract number from text like "$450,000" or "$450K"
+                price_match = re.search(r'\$([0-9,]+)([KM]?)', price_text)
+                if price_match:
+                    price_num = int(price_match.group(1).replace(',', ''))
+                    multiplier = price_match.group(2)
+                    if multiplier == 'K':
+                        price_num *= 1000
+                    elif multiplier == 'M':
+                        price_num *= 1000000
+                    return price_num
+        except:
             continue
-        
-        street = extract_street(disp.text if disp else None, a["href"])
-        if not street:
-            continue
-            
-        # Extract square footage from various possible selectors
-        sqft = 0
-        sqft_selectors = [
-            "div.stats span:contains('Sq Ft')",
-            "div.homeStatsV2 span:contains('Sq Ft')", 
-            "div.HomeStatsV2 span:contains('Sq Ft')",
-            "span.sqft-value",
-            "span.value:contains('Sq Ft')",
-            "[data-rf-test-id='abp-sqFt']",
-            ".sqft"
-        ]
-        
-        # Try different patterns for square footage
-        for selector in sqft_selectors:
+    
+    # Fallback: search entire card text for price patterns
+    card_text = card.get_text()
+    price_patterns = [
+        r'\$([0-9,]+)([KM]?)',
+        r'Price:\s*\$([0-9,]+)',
+        r'([0-9,]+)\s*dollars'
+    ]
+    
+    for pattern in price_patterns:
+        match = re.search(pattern, card_text)
+        if match:
             try:
-                sqft_elem = card.select_one(selector)
-                if sqft_elem:
-                    sqft_text = sqft_elem.get_text()
-                    # Extract number from text like "1,920 Sq Ft" or "1920"
-                    sqft_match = re.search(r'([\d,]+)', sqft_text)
-                    if sqft_match:
-                        sqft = int(sqft_match.group(1).replace(',', ''))
-                        break
-            except:
+                price_num = int(match.group(1).replace(',', ''))
+                if len(match.groups()) > 1:
+                    multiplier = match.group(2)
+                    if multiplier == 'K':
+                        price_num *= 1000
+                    elif multiplier == 'M':
+                        price_num *= 1000000
+                return price_num
+            except ValueError:
                 continue
-        
-        # If no specific sqft selector worked, try searching the entire card text
-        if sqft == 0:
-            card_text = card.get_text()
-            # Look for patterns like "1,920 Sq Ft", "1920 sqft", etc.
-            sqft_patterns = [
-                r'([\d,]+)\s*[Ss]q\s*[Ff]t',
-                r'([\d,]+)\s*[Ss]quare\s*[Ff]eet',
-                r'([\d,]+)\s*SF\b'
-            ]
-            
-            for pattern in sqft_patterns:
-                match = re.search(pattern, card_text)
-                if match:
-                    try:
-                        sqft = int(match.group(1).replace(',', ''))
-                        break
-                    except ValueError:
-                        continue
-        
-        properties.append({
-            'street': street,
-            'sqft': sqft
-        })
     
-    return properties
+    return 0
+
+def extract_lot_size_from_card(card) -> float:
+    """Extract lot size in acres from Redfin property card."""
+    lot_selectors = [
+        ".lot-size",
+        ".lotSize",
+        "[data-rf-test-id='abp-lotSize']",
+        ".homeStatsV2 .stat-block"
+    ]
+    
+    for selector in lot_selectors:
+        try:
+            lot_elem = card.select_one(selector)
+            if lot_elem:
+                lot_text = lot_elem.get_text()
+                # Look for patterns like "0.25 Acres", "10,890 Sq Ft", etc.
+                acre_match = re.search(r'([\d.]+)\s*[Aa]cres?', lot_text)
+                if acre_match:
+                    return float(acre_match.group(1))
+                
+                # Convert square feet to acres (43,560 sq ft = 1 acre)
+                sqft_match = re.search(r'([\d,]+)\s*[Ss]q\s*[Ff]t', lot_text)
+                if sqft_match:
+                    sqft = int(sqft_match.group(1).replace(',', ''))
+                    return round(sqft / 43560, 3)  # Convert to acres, 3 decimal places
+        except:
+            continue
+    
+    # Fallback: search entire card text
+    card_text = card.get_text()
+    lot_patterns = [
+        r'([\d.]+)\s*[Aa]cres?',
+        r'Lot\s*Size:?\s*([\d,]+)\s*[Ss]q\s*[Ff]t',
+        r'([\d,]+)\s*[Ss]q\s*[Ff]t\s*lot'
+    ]
+    
+    for pattern in lot_patterns:
+        match = re.search(pattern, card_text)
+        if match:
+            try:
+                if 'acre' in pattern.lower():
+                    return float(match.group(1))
+                else:
+                    # Convert sq ft to acres
+                    sqft = int(match.group(1).replace(',', ''))
+                    return round(sqft / 43560, 3)
+            except ValueError:
+                continue
+    
+    return 0.0
+
+def extract_post_date_from_card(card) -> str:
+    """Extract post/listing date from Redfin property card."""
+    date_selectors = [
+        ".date-posted",
+        ".listing-date",
+        "[data-rf-test-id='abp-datePosted']",
+        ".days-on-market",
+        ".dom"
+    ]
+    
+    for selector in date_selectors:
+        try:
+            date_elem = card.select_one(selector)
+            if date_elem:
+                date_text = date_elem.get_text()
+                # Look for date patterns or "X days ago"
+                date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', date_text)
+                if date_match:
+                    return date_match.group(1)
+                    
+                days_ago_match = re.search(r'(\d+)\s*days?\s*ago', date_text, re.IGNORECASE)
+                if days_ago_match:
+                    days_ago = int(days_ago_match.group(1))
+                    post_date = dt.datetime.now() - dt.timedelta(days=days_ago)
+                    return post_date.strftime('%m/%d/%Y')
+        except:
+            continue
+    
+    # Fallback: search entire card text
+    card_text = card.get_text()
+    date_patterns = [
+        r'Posted:?\s*(\d{1,2}/\d{1,2}/\d{4})',
+        r'Listed:?\s*(\d{1,2}/\d{1,2}/\d{4})',
+        r'(\d+)\s*days?\s*on\s*market',
+        r'(\d+)\s*days?\s*ago'
+    ]
+    
+    for pattern in date_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                if '/' in match.group(1):
+                    return match.group(1)
+                else:
+                    # Days ago format
+                    days_ago = int(match.group(1))
+                    post_date = dt.datetime.now() - dt.timedelta(days=days_ago)
+                    return post_date.strftime('%m/%d/%Y')
+            except ValueError:
+                continue
+    
+    return ""
+
+def fetch_redfin_properties() -> list[dict]:
+    """Fetch Redfin properties from both Spokane City and County with enhanced data."""
+    all_properties = []
+    
+    for source_name, url in REDFIN_SOURCES.items():
+        logging.info("Fetching properties from %s...", source_name)
+        try:
+            html = requests.get(url, headers=HDRS, timeout=30).text
+            soup = BeautifulSoup(html, "html.parser")
+            
+            for card in soup.select("div.HomeCardContainer"):
+                a = card.find("a", href=True)
+                disp = card.select_one("div.homeAddressV2")
+                if not a:
+                    continue
+                
+                street = extract_street(disp.text if disp else None, a["href"])
+                if not street:
+                    continue
+                
+                # Extract existing sqft data
+                sqft = 0
+                sqft_selectors = [
+                    "div.stats span:contains('Sq Ft')",
+                    "div.homeStatsV2 span:contains('Sq Ft')", 
+                    "div.HomeStatsV2 span:contains('Sq Ft')",
+                    "span.sqft-value",
+                    "span.value:contains('Sq Ft')",
+                    "[data-rf-test-id='abp-sqFt']",
+                    ".sqft"
+                ]
+                
+                for selector in sqft_selectors:
+                    try:
+                        sqft_elem = card.select_one(selector)
+                        if sqft_elem:
+                            sqft_text = sqft_elem.get_text()
+                            sqft_match = re.search(r'([\d,]+)', sqft_text)
+                            if sqft_match:
+                                sqft = int(sqft_match.group(1).replace(',', ''))
+                                break
+                    except:
+                        continue
+                
+                # Fallback sqft extraction
+                if sqft == 0:
+                    card_text = card.get_text()
+                    sqft_patterns = [
+                        r'([\d,]+)\s*[Ss]q\s*[Ff]t',
+                        r'([\d,]+)\s*[Ss]quare\s*[Ff]eet',
+                        r'([\d,]+)\s*SF\b'
+                    ]
+                    
+                    for pattern in sqft_patterns:
+                        match = re.search(pattern, card_text)
+                        if match:
+                            try:
+                                sqft = int(match.group(1).replace(',', ''))
+                                break
+                            except ValueError:
+                                continue
+                
+                # Extract new data fields
+                price = extract_price_from_card(card)
+                lot_size_acres = extract_lot_size_from_card(card)
+                post_date = extract_post_date_from_card(card)
+                
+                all_properties.append({
+                    'street': street,
+                    'sqft': sqft,
+                    'price': price,
+                    'lot_size_acres': lot_size_acres,
+                    'post_date': post_date,
+                    'source': source_name  # Track which source this came from
+                })
+            
+            logging.info("Found %d properties from %s", 
+                        len([p for p in all_properties if p['source'] == source_name]), source_name)
+                        
+        except Exception as e:
+            logging.error("Error fetching from %s: %s", source_name, str(e))
+            continue
+    
+    logging.info("Total properties found: %d", len(all_properties))
+    return all_properties
 
 def fetch_redfin_streets() -> list[str]:
     """Legacy function - returns just street names for backwards compatibility."""
@@ -178,10 +358,55 @@ def arcgis_pid(street: str) -> str | None:
         return None
     return feats[0]["attributes"]["PID_NUM"]
 
-def legal_for_pid(pid: str) -> tuple[str, str]:
+def extract_jurisdiction_from_scout(text: str, html: str) -> str:
+    """Extract jurisdiction (Valley/County/City) from SCOUT data."""
+    # Look for jurisdiction information in the SCOUT text/HTML
+    jurisdiction_patterns = [
+        r'Jurisdiction:?\s*([A-Za-z\s]+)',
+        r'City:?\s*([A-Za-z\s]+)',
+        r'County:?\s*([A-Za-z\s]+)',
+        r'Valley:?\s*([A-Za-z\s]+)'
+    ]
+    
+    # Try HTML first for more structured data
+    soup = BeautifulSoup(html, "html.parser")
+    
+    # Look for table cells or spans containing jurisdiction info
+    for elem in soup.find_all(['td', 'span', 'div']):
+        elem_text = elem.get_text().strip()
+        if 'jurisdiction' in elem_text.lower():
+            # Try to find the value in the next sibling or parent structure
+            next_elem = elem.find_next_sibling()
+            if next_elem:
+                return next_elem.get_text().strip()
+    
+    # Fallback to text pattern matching
+    upper_text = text.upper()
+    for pattern in jurisdiction_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            jurisdiction = match.group(1).strip()
+            if jurisdiction and len(jurisdiction) > 1:
+                return jurisdiction.title()  # Proper case
+    
+    # Additional patterns specific to common jurisdictions in Spokane area
+    if 'SPOKANE VALLEY' in upper_text:
+        return 'Spokane Valley'
+    elif 'SPOKANE COUNTY' in upper_text:
+        return 'Spokane County'  
+    elif 'CITY OF SPOKANE' in upper_text:
+        return 'City of Spokane'
+    elif 'UNINCORPORATED' in upper_text:
+        return 'Unincorporated County'
+    
+    return "Unknown"
+
+def legal_for_pid(pid: str) -> tuple[str, str, str]:
+    """Updated to also return jurisdiction information."""
     html = requests.get(SCOUT_SUMMARY.format(pid), headers=HDRS, timeout=30).text
     text = BeautifulSoup(html, "html.parser").get_text(separator="\n")
-    return text, html
+    jurisdiction = extract_jurisdiction_from_scout(text, html)
+    return text, html, jurisdiction
 
 def should_skip_property(legal_desc: str) -> bool:
     """Check if property should be skipped based on Aaron's filter criteria."""
@@ -762,7 +987,7 @@ def main():
     ap.add_argument("--ranch-min-sqft", type=int, default=1500, help="minimum square footage for Ranch search (default: 1500)")
     args = ap.parse_args()
 
-    # Fetch Redfin properties with square footage
+    # Fetch Redfin properties with enhanced data
     properties = fetch_redfin_properties()
     if args.limit:
         properties = properties[:args.limit]
@@ -773,12 +998,22 @@ def main():
     for i, prop in enumerate(properties,1):
         street = prop['street']
         redfin_sqft = prop['sqft']
-        logging.info("[%d/%d] %s (Redfin: %d sqft)", i, len(properties), street, redfin_sqft)
+        price = prop['price']
+        lot_size_acres = prop['lot_size_acres']
+        post_date = prop['post_date']
+        source = prop['source']
+        
+        logging.info("[%d/%d] %s (Source: %s | Price: $%s | %d sqft | %.3f acres | Posted: %s)", 
+                    i, len(properties), street, source, 
+                    f"{price:,}" if price > 0 else "N/A",
+                    redfin_sqft, lot_size_acres, post_date or "N/A")
         
         pid = arcgis_pid(street)
         if not pid:
             continue
-        full_text, _ = legal_for_pid(pid)
+            
+        full_text, html, jurisdiction = legal_for_pid(pid)
+        
         # Extract legal description between 'Active' and 'Appraisal'
         legal_desc = ""
         try:
@@ -798,9 +1033,14 @@ def main():
             "street": street,
             "pid": pid,
             "legal_description": legal_desc,
-            "sqft": redfin_sqft,  # Use square footage from Redfin
+            "sqft": redfin_sqft,  
+            "price": price,
+            "lot_size_acres": lot_size_acres,
+            "post_date": post_date,
+            "source": source,
+            "jurisdiction": jurisdiction,
             "full_page_text": full_text,
-            **enhanced_kw_counts(full_text, redfin_sqft)  # Pass Redfin sqft to keyword analysis
+            **enhanced_kw_counts(full_text, redfin_sqft)
         })
         time.sleep(0.3)   # polite throttle
     
