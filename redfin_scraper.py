@@ -175,58 +175,162 @@ def extract_post_date_from_card(card) -> str:
     """Extract post/listing date from Redfin property card."""
     card_text = card.get_text()
     
-    # Look for Redfin's relative time formats like "1 HR AGO", "17 HRS AGO", "NEW 1 HR AGO"
+    # Debug: log some card text to see what we're working with
+    # logging.info("Card text sample: %s", card_text[:200])
+    
+    # Look for various Redfin date/time patterns
     time_patterns = [
-        r'(\d+)\s*HR\s*AGO',         # "1 HR AGO"
-        r'(\d+)\s*HRS\s*AGO',        # "17 HRS AGO"
-        r'(\d+)\s*MIN\s*AGO',        # "30 MIN AGO"
-        r'(\d+)\s*MINS\s*AGO',       # "45 MINS AGO"
-        r'(\d+)\s*DAY\s*AGO',        # "1 DAY AGO"
-        r'(\d+)\s*DAYS\s*AGO',       # "3 DAYS AGO"
-        r'NEW\s+(\d+)\s*HR\s*AGO',   # "NEW 1 HR AGO"
-        r'NEW\s+(\d+)\s*HRS\s*AGO',  # "NEW 17 HRS AGO"
-        r'NEW\s+(\d+)\s*MIN\s*AGO',  # "NEW 30 MIN AGO"
-        r'NEW\s+(\d+)\s*MINS\s*AGO', # "NEW 45 MINS AGO"
-        r'NEW\s+(\d+)\s*DAY\s*AGO',  # "NEW 1 DAY AGO"
-        r'NEW\s+(\d+)\s*DAYS\s*AGO'  # "NEW 3 DAYS AGO"
+        # Relative time patterns
+        r'(\d+)\s*HR\s*AGO',           # "1 HR AGO"
+        r'(\d+)\s*HRS\s*AGO',          # "17 HRS AGO" 
+        r'(\d+)\s*HOUR\s*AGO',         # "1 HOUR AGO"
+        r'(\d+)\s*HOURS\s*AGO',        # "17 HOURS AGO"
+        r'(\d+)\s*MIN\s*AGO',          # "30 MIN AGO"
+        r'(\d+)\s*MINS\s*AGO',         # "45 MINS AGO"
+        r'(\d+)\s*MINUTE\s*AGO',       # "1 MINUTE AGO"
+        r'(\d+)\s*MINUTES\s*AGO',      # "45 MINUTES AGO"
+        r'(\d+)\s*DAY\s*AGO',          # "1 DAY AGO"
+        r'(\d+)\s*DAYS\s*AGO',         # "3 DAYS AGO"
+        r'(\d+)\s*WEEK\s*AGO',         # "1 WEEK AGO"
+        r'(\d+)\s*WEEKS\s*AGO',        # "2 WEEKS AGO"
+        r'(\d+)\s*MONTH\s*AGO',        # "1 MONTH AGO"
+        r'(\d+)\s*MONTHS\s*AGO',       # "2 MONTHS AGO"
+        
+        # NEW prefix patterns
+        r'NEW\s+(\d+)\s*HR\s*AGO',     # "NEW 1 HR AGO"
+        r'NEW\s+(\d+)\s*HRS\s*AGO',    # "NEW 17 HRS AGO"
+        r'NEW\s+(\d+)\s*HOUR\s*AGO',   # "NEW 1 HOUR AGO"
+        r'NEW\s+(\d+)\s*HOURS\s*AGO',  # "NEW 17 HOURS AGO"
+        r'NEW\s+(\d+)\s*MIN\s*AGO',    # "NEW 30 MIN AGO"
+        r'NEW\s+(\d+)\s*MINS\s*AGO',   # "NEW 45 MINS AGO"
+        r'NEW\s+(\d+)\s*MINUTE\s*AGO', # "NEW 1 MINUTE AGO"
+        r'NEW\s+(\d+)\s*MINUTES\s*AGO',# "NEW 45 MINUTES AGO"
+        r'NEW\s+(\d+)\s*DAY\s*AGO',    # "NEW 1 DAY AGO"
+        r'NEW\s+(\d+)\s*DAYS\s*AGO',   # "NEW 3 DAYS AGO"
+        r'NEW\s+(\d+)\s*WEEK\s*AGO',   # "NEW 1 WEEK AGO"
+        r'NEW\s+(\d+)\s*WEEKS\s*AGO',  # "NEW 2 WEEKS AGO"
+        r'NEW\s+(\d+)\s*MONTH\s*AGO',  # "NEW 1 MONTH AGO"
+        r'NEW\s+(\d+)\s*MONTHS\s*AGO', # "NEW 2 MONTHS AGO"
+        
+        # Simple "NEW" indicators (treat as today)
+        r'\bNEW\b',                    # Just "NEW" by itself
+        r'NEW\s+LISTING',              # "NEW LISTING"
+        r'JUST\s+LISTED',              # "JUST LISTED"
+        r'PRICE\s+IMPROVEMENT',        # "PRICE IMPROVEMENT"
     ]
     
     for pattern in time_patterns:
         match = re.search(pattern, card_text, re.IGNORECASE)
         if match:
             try:
-                time_value = int(match.group(1))
                 now = dt.datetime.now()
                 
+                # Handle simple "NEW" without numbers
+                if pattern in [r'\bNEW\b', r'NEW\s+LISTING', r'JUST\s+LISTED', r'PRICE\s+IMPROVEMENT']:
+                    return now.strftime('%m/%d/%Y')
+                
+                time_value = int(match.group(1))
+                
                 # Determine the time unit and calculate the post date
-                if 'HR' in pattern:
+                if 'HR' in pattern or 'HOUR' in pattern:
                     post_datetime = now - dt.timedelta(hours=time_value)
                 elif 'MIN' in pattern:
                     post_datetime = now - dt.timedelta(minutes=time_value)
                 elif 'DAY' in pattern:
                     post_datetime = now - dt.timedelta(days=time_value)
+                elif 'WEEK' in pattern:
+                    post_datetime = now - dt.timedelta(weeks=time_value)
+                elif 'MONTH' in pattern:
+                    post_datetime = now - dt.timedelta(days=time_value * 30)  # Approximate
                 else:
                     continue
                 
                 # Return just the calendar date (no time)
                 return post_datetime.strftime('%m/%d/%Y')
                 
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, IndexError):
                 continue
     
-    # Fallback: look for traditional date formats
+    # Look for explicit date formats
     date_patterns = [
-        r'(\d{1,2}/\d{1,2}/\d{4})',
-        r'Posted:?\s*(\d{1,2}/\d{1,2}/\d{4})',
-        r'Listed:?\s*(\d{1,2}/\d{1,2}/\d{4})'
+        # Standard US date formats
+        r'(\d{1,2}/\d{1,2}/\d{4})',              # "12/25/2024"
+        r'(\d{1,2}-\d{1,2}-\d{4})',              # "12-25-2024"
+        r'(\d{4}-\d{1,2}-\d{1,2})',              # "2024-12-25"
+        
+        # With context
+        r'Posted:?\s*(\d{1,2}/\d{1,2}/\d{4})',   # "Posted: 12/25/2024"
+        r'Listed:?\s*(\d{1,2}/\d{1,2}/\d{4})',   # "Listed: 12/25/2024"
+        r'Added:?\s*(\d{1,2}/\d{1,2}/\d{4})',    # "Added: 12/25/2024"
+        r'Date:?\s*(\d{1,2}/\d{1,2}/\d{4})',     # "Date: 12/25/2024"
+        
+        # Month names
+        r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),?\s+(\d{4})',  # "Jan 15, 2024"
+        r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})',     # "15 Jan 2024"
     ]
     
     for pattern in date_patterns:
-        match = re.search(pattern, card_text)
+        match = re.search(pattern, card_text, re.IGNORECASE)
         if match:
-            return match.group(1)
+            try:
+                if len(match.groups()) == 1:
+                    # Simple date format
+                    date_str = match.group(1)
+                    # Validate the date isn't in the future
+                    try:
+                        parsed_date = dt.datetime.strptime(date_str, '%m/%d/%Y')
+                        if parsed_date <= dt.datetime.now():
+                            return date_str
+                    except ValueError:
+                        try:
+                            parsed_date = dt.datetime.strptime(date_str, '%m-%d-%Y')
+                            if parsed_date <= dt.datetime.now():
+                                return parsed_date.strftime('%m/%d/%Y')
+                        except ValueError:
+                            try:
+                                parsed_date = dt.datetime.strptime(date_str, '%Y-%m-%d')
+                                if parsed_date <= dt.datetime.now():
+                                    return parsed_date.strftime('%m/%d/%Y')
+                            except ValueError:
+                                continue
+                elif len(match.groups()) == 3:
+                    # Month name format
+                    month_name, day, year = match.groups()
+                    if month_name.upper() in ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+                                            'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']:
+                        try:
+                            month_num = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+                                       'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'].index(month_name.upper()) + 1
+                            parsed_date = dt.datetime(int(year), month_num, int(day))
+                            if parsed_date <= dt.datetime.now():
+                                return parsed_date.strftime('%m/%d/%Y')
+                        except (ValueError, IndexError):
+                            continue
+            except (ValueError, TypeError, IndexError):
+                continue
     
-    return ""
+    # Look for "Today", "Yesterday" etc.
+    relative_date_patterns = [
+        r'\bTODAY\b',
+        r'\bYESTERDAY\b',
+        r'THIS\s+WEEK',
+        r'LAST\s+WEEK'
+    ]
+    
+    for pattern in relative_date_patterns:
+        if re.search(pattern, card_text, re.IGNORECASE):
+            now = dt.datetime.now()
+            if 'TODAY' in pattern:
+                return now.strftime('%m/%d/%Y')
+            elif 'YESTERDAY' in pattern:
+                return (now - dt.timedelta(days=1)).strftime('%m/%d/%Y')
+            elif 'THIS WEEK' in pattern:
+                return (now - dt.timedelta(days=3)).strftime('%m/%d/%Y')  # Rough estimate
+            elif 'LAST WEEK' in pattern:
+                return (now - dt.timedelta(days=7)).strftime('%m/%d/%Y')
+    
+    # Default fallback: assume listing posted today when no patterns matched
+    return dt.datetime.now().strftime('%m/%d/%Y')
 
 def fetch_redfin_properties() -> list[dict]:
     """Fetch Redfin properties from both Spokane City and County with enhanced data."""
