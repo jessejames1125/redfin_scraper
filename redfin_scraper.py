@@ -99,102 +99,67 @@ def extract_street(card_addr: str | None, url_href: str) -> str:
 
 def extract_price_from_card(card) -> int:
     """Extract price from Redfin property card."""
-    price_selectors = [
-        ".homecardV2Price",
-        ".price",
-        "[data-rf-test-id='abp-price']",
-        ".homePrice",
-        ".priceText"
-    ]
-    
-    for selector in price_selectors:
-        try:
-            price_elem = card.select_one(selector)
-            if price_elem:
-                price_text = price_elem.get_text()
-                # Extract number from text like "$450,000" or "$450K"
-                price_match = re.search(r'\$([0-9,]+)([KM]?)', price_text)
-                if price_match:
-                    price_num = int(price_match.group(1).replace(',', ''))
-                    multiplier = price_match.group(2)
-                    if multiplier == 'K':
-                        price_num *= 1000
-                    elif multiplier == 'M':
-                        price_num *= 1000000
-                    return price_num
-        except:
-            continue
-    
-    # Fallback: search entire card text for price patterns
     card_text = card.get_text()
+    
+    # Look for price patterns in the entire card text
     price_patterns = [
-        r'\$([0-9,]+)([KM]?)',
-        r'Price:\s*\$([0-9,]+)',
-        r'([0-9,]+)\s*dollars'
+        r'\$([0-9,]+)\s*M',      # $1.5M format
+        r'\$([0-9,]+)\s*K',      # $450K format  
+        r'\$([0-9,]+(?:\.[0-9]+)?)\s*M',  # $1.25M format
+        r'\$([0-9,]+)',          # $450,000 format
+        r'([0-9,]+)\s*K',        # 450K format (no $)
+        r'([0-9,]+)'             # Raw numbers as last resort
     ]
     
     for pattern in price_patterns:
-        match = re.search(pattern, card_text)
-        if match:
+        matches = re.findall(pattern, card_text)
+        for match in matches:
             try:
-                price_num = int(match.group(1).replace(',', ''))
-                if len(match.groups()) > 1:
-                    multiplier = match.group(2)
-                    if multiplier == 'K':
-                        price_num *= 1000
-                    elif multiplier == 'M':
-                        price_num *= 1000000
-                return price_num
-            except ValueError:
+                # Clean the match
+                price_str = match.replace(',', '').replace('$', '')
+                price_num = float(price_str)
+                
+                # Apply multipliers based on pattern
+                if 'M' in pattern:
+                    price_num *= 1000000
+                elif 'K' in pattern:
+                    price_num *= 1000
+                
+                # Only accept reasonable house prices (between $50K and $50M)
+                if 50000 <= price_num <= 50000000:
+                    return int(price_num)
+                    
+            except (ValueError, TypeError):
                 continue
     
     return 0
 
 def extract_lot_size_from_card(card) -> float:
     """Extract lot size in acres from Redfin property card."""
-    lot_selectors = [
-        ".lot-size",
-        ".lotSize",
-        "[data-rf-test-id='abp-lotSize']",
-        ".homeStatsV2 .stat-block"
-    ]
-    
-    for selector in lot_selectors:
-        try:
-            lot_elem = card.select_one(selector)
-            if lot_elem:
-                lot_text = lot_elem.get_text()
-                # Look for patterns like "0.25 Acres", "10,890 Sq Ft", etc.
-                acre_match = re.search(r'([\d.]+)\s*[Aa]cres?', lot_text)
-                if acre_match:
-                    return float(acre_match.group(1))
-                
-                # Convert square feet to acres (43,560 sq ft = 1 acre)
-                sqft_match = re.search(r'([\d,]+)\s*[Ss]q\s*[Ff]t', lot_text)
-                if sqft_match:
-                    sqft = int(sqft_match.group(1).replace(',', ''))
-                    return round(sqft / 43560, 3)  # Convert to acres, 3 decimal places
-        except:
-            continue
-    
-    # Fallback: search entire card text
+    # Look for lot size in various formats
     card_text = card.get_text()
+    
+    # Look for "X,XXX sq ft lot" or "X.X acres" patterns
     lot_patterns = [
-        r'([\d.]+)\s*[Aa]cres?',
-        r'Lot\s*Size:?\s*([\d,]+)\s*[Ss]q\s*[Ff]t',
-        r'([\d,]+)\s*[Ss]q\s*[Ff]t\s*lot'
+        r'([\d,]+)\s*sq\s*ft\s*lot',
+        r'([\d.]+)\s*acres?\s*lot',
+        r'([\d.]+)\s*acres?(?:\s|$)',
+        r'Lot.*?([\d,]+)\s*sq.*?ft',
+        r'Lot.*?([\d.]+)\s*acres?'
     ]
     
     for pattern in lot_patterns:
-        match = re.search(pattern, card_text)
+        match = re.search(pattern, card_text, re.IGNORECASE)
         if match:
             try:
-                if 'acre' in pattern.lower():
-                    return float(match.group(1))
+                value_str = match.group(1).replace(',', '')
+                value = float(value_str)
+                
+                # If it's square feet, convert to acres
+                if 'sq' in pattern or 'ft' in pattern:
+                    return round(value / 43560, 3)  # Convert sq ft to acres
                 else:
-                    # Convert sq ft to acres
-                    sqft = int(match.group(1).replace(',', ''))
-                    return round(sqft / 43560, 3)
+                    return value  # Already in acres
             except ValueError:
                 continue
     
@@ -358,46 +323,57 @@ def arcgis_pid(street: str) -> str | None:
         return None
     return feats[0]["attributes"]["PID_NUM"]
 
+def extract_lot_size_from_scout(text: str) -> float:
+    """Extract lot size in acres from SCOUT data."""
+    # Look for patterns like "6540 Square Feet" or "5 Acre(s)" or "1.3 Acre(s)"
+    # These appear after the city name in the Site Address section
+    
+    # Pattern for acres
+    acre_match = re.search(r'(\d+\.?\d*)\s+Acre\(s\)', text)
+    if acre_match:
+        try:
+            return float(acre_match.group(1))
+        except ValueError:
+            pass
+    
+    # Pattern for square feet
+    sqft_match = re.search(r'(\d+)\s+Square Feet', text)
+    if sqft_match:
+        try:
+            sqft = int(sqft_match.group(1))
+            return round(sqft / 43560, 3)  # Convert to acres
+        except ValueError:
+            pass
+    
+    return 0.0
+
 def extract_jurisdiction_from_scout(text: str, html: str) -> str:
     """Extract jurisdiction (Valley/County/City) from SCOUT data."""
-    # Look for jurisdiction information in the SCOUT text/HTML
-    jurisdiction_patterns = [
-        r'Jurisdiction:?\s*([A-Za-z\s]+)',
-        r'City:?\s*([A-Za-z\s]+)',
-        r'County:?\s*([A-Za-z\s]+)',
-        r'Valley:?\s*([A-Za-z\s]+)'
-    ]
+    # Look for the city in the Site Address section
+    # Pattern: Site Address Parcel Type Site Address City Land Size...
+    city_match = re.search(r'Site Address\s+([A-Z\s]+?)\s+(?:\d+\s+Square Feet|\d+\.?\d*\s+Acre)', text)
+    if city_match:
+        city = city_match.group(1).strip()
+        if city == "SPOKANE":
+            # Look at tax code to determine if it's City of Spokane vs Spokane County
+            # Tax codes starting with 0xxx are typically City of Spokane
+            # Tax codes like 1280, higher numbers might be county/valley
+            tax_code_match = re.search(r'Tax Code Area Status.*?(\d{4})', text)
+            if tax_code_match:
+                tax_code = tax_code_match.group(1)
+                if tax_code.startswith('0'):
+                    return "City of Spokane"
+                else:
+                    return "Spokane County"
+            return "City of Spokane"  # Default for SPOKANE
+        else:
+            return city.title()
     
-    # Try HTML first for more structured data
-    soup = BeautifulSoup(html, "html.parser")
-    
-    # Look for table cells or spans containing jurisdiction info
-    for elem in soup.find_all(['td', 'span', 'div']):
-        elem_text = elem.get_text().strip()
-        if 'jurisdiction' in elem_text.lower():
-            # Try to find the value in the next sibling or parent structure
-            next_elem = elem.find_next_sibling()
-            if next_elem:
-                return next_elem.get_text().strip()
-    
-    # Fallback to text pattern matching
-    upper_text = text.upper()
-    for pattern in jurisdiction_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            jurisdiction = match.group(1).strip()
-            if jurisdiction and len(jurisdiction) > 1:
-                return jurisdiction.title()  # Proper case
-    
-    # Additional patterns specific to common jurisdictions in Spokane area
-    if 'SPOKANE VALLEY' in upper_text:
+    # Fallback patterns
+    if 'SPOKANE VALLEY' in text.upper():
         return 'Spokane Valley'
-    elif 'SPOKANE COUNTY' in upper_text:
-        return 'Spokane County'  
-    elif 'CITY OF SPOKANE' in upper_text:
+    elif 'SPOKANE' in text.upper():
         return 'City of Spokane'
-    elif 'UNINCORPORATED' in upper_text:
-        return 'Unincorporated County'
     
     return "Unknown"
 
@@ -819,7 +795,6 @@ def create_test_email_file(excel_path: Path, pdf_path: Path, stats_summary: dict
                         <li>• Properties with keywords: {stats_summary.get('properties_with_keywords', 'N/A')}</li>
                         <li>• Unique keywords found: {stats_summary.get('unique_keywords', 'N/A')}</li>
                         <li>• Properties with lot numbers: {stats_summary.get('properties_with_lots', 'N/A')}</li>
-                        <li>• Ranch properties found: {stats_summary.get('ranch_properties', 'N/A')}</li>
                     </ul>
                 </div>
                 
@@ -926,10 +901,9 @@ SUMMARY:
 • Properties with keywords: {stats_summary.get('properties_with_keywords', 'N/A')}
 • Unique keywords found: {stats_summary.get('unique_keywords', 'N/A')}
 • Properties with lot numbers: {stats_summary.get('properties_with_lots', 'N/A')}
-• Ranch properties found: {stats_summary.get('ranch_properties', 'N/A')}
 
 Attachments:
-📊 Excel file with 6 sheets: Raw Data, Keyword Summary, Keyword Stats, Lot Analysis, Ranch Properties, and Overview
+📊 Excel file with 5 sheets: Raw Data, Keyword Summary, Keyword Stats, Lot Analysis, and Overview
 📄 PDF report with key findings and visualizations
 
 Best regards,
@@ -1003,16 +977,23 @@ def main():
         post_date = prop['post_date']
         source = prop['source']
         
-        logging.info("[%d/%d] %s (Source: %s | Price: $%s | %d sqft | %.3f acres | Posted: %s)", 
+        logging.info("[%d/%d] %s (Source: %s | Price: $%s | Posted: %s)", 
                     i, len(properties), street, source, 
                     f"{price:,}" if price > 0 else "N/A",
-                    redfin_sqft, lot_size_acres, post_date or "N/A")
+                    post_date or "N/A")
         
         pid = arcgis_pid(street)
         if not pid:
             continue
             
         full_text, html, jurisdiction = legal_for_pid(pid)
+        
+        # Extract lot size and square footage from SCOUT data (more reliable than Redfin)
+        scout_lot_size_acres = extract_lot_size_from_scout(full_text)
+        scout_sqft = extract_square_footage(full_text)
+        
+        logging.info("→ SCOUT data: %d sqft | %.3f acres | %s jurisdiction", 
+                    scout_sqft, scout_lot_size_acres, jurisdiction)
         
         # Extract legal description between 'Active' and 'Appraisal'
         legal_desc = ""
@@ -1033,14 +1014,14 @@ def main():
             "street": street,
             "pid": pid,
             "legal_description": legal_desc,
-            "sqft": redfin_sqft,  
+            "sqft": scout_sqft,  # Now using SCOUT data  
             "price": price,
-            "lot_size_acres": lot_size_acres,
+            "lot_size_acres": scout_lot_size_acres,  # Now using SCOUT data
             "post_date": post_date,
             "source": source,
             "jurisdiction": jurisdiction,
             "full_page_text": full_text,
-            **enhanced_kw_counts(full_text, redfin_sqft)
+            **enhanced_kw_counts(full_text, scout_sqft)  # Use SCOUT sqft for keyword analysis
         })
         time.sleep(0.3)   # polite throttle
     
@@ -1074,7 +1055,6 @@ def main():
         'Total Unique Keywords Found': len(stats_df) if not stats_df.empty else 0,
         'Most Common Keyword': stats_df.iloc[0]['keyword'] if not stats_df.empty else 'None',
         'Properties with Lot Numbers': len(lot_df) if not lot_df.empty else 0,
-        'Ranch Properties Found': len(ranch_df) if not ranch_df.empty else 0,
         'Date Generated': batch_id
     }
     
@@ -1097,10 +1077,10 @@ def main():
             lot_df.to_excel(writer, sheet_name='Lot Analysis', index=False)
             logging.info("Created Lot Analysis with %d properties", len(lot_df))
         
-        # Ranch Properties - Aaron's special search
-        if not ranch_df.empty:
-            ranch_df.to_excel(writer, sheet_name='Ranch Properties', index=False)
-            logging.info("Created Ranch Properties sheet with %d properties", len(ranch_df))
+        # Ranch Properties - stubbed out for now
+        # if not ranch_df.empty:
+        #     ranch_df.to_excel(writer, sheet_name='Ranch Properties', index=False)
+        #     logging.info("Created Ranch Properties sheet with %d properties", len(ranch_df))
         
         # Overview sheet
         overview_df = pd.DataFrame(list(overview_data.items()), columns=['Metric', 'Value'])
@@ -1117,8 +1097,7 @@ def main():
             'total_properties': len(df),
             'properties_with_keywords': len(summary_df) if not summary_df.empty else 0,
             'unique_keywords': len(stats_df) if not stats_df.empty else 0,
-            'properties_with_lots': len(lot_df) if not lot_df.empty else 0,
-            'ranch_properties': len(ranch_df) if not ranch_df.empty else 0
+            'properties_with_lots': len(lot_df) if not lot_df.empty else 0
         }
         
         # Test email mode (default) or real email mode
