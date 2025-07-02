@@ -127,7 +127,13 @@ def extract_price_from_card(card) -> int:
                 
                 # Only accept reasonable house prices (between $50K and $50M)
                 if 50000 <= price_num <= 50000000:
-                    return int(price_num)
+                    price_int = int(price_num)
+                    # Trim rightmost digit as suggested - prices seem to have extra digit
+                    price_str = str(price_int)
+                    if len(price_str) > 5:  # Only trim if more than 5 digits
+                        price_int = int(price_str[:-1])  # Remove rightmost digit
+                    
+                    return price_int
                     
             except (ValueError, TypeError):
                 continue
@@ -167,54 +173,58 @@ def extract_lot_size_from_card(card) -> float:
 
 def extract_post_date_from_card(card) -> str:
     """Extract post/listing date from Redfin property card."""
-    date_selectors = [
-        ".date-posted",
-        ".listing-date",
-        "[data-rf-test-id='abp-datePosted']",
-        ".days-on-market",
-        ".dom"
-    ]
-    
-    for selector in date_selectors:
-        try:
-            date_elem = card.select_one(selector)
-            if date_elem:
-                date_text = date_elem.get_text()
-                # Look for date patterns or "X days ago"
-                date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', date_text)
-                if date_match:
-                    return date_match.group(1)
-                    
-                days_ago_match = re.search(r'(\d+)\s*days?\s*ago', date_text, re.IGNORECASE)
-                if days_ago_match:
-                    days_ago = int(days_ago_match.group(1))
-                    post_date = dt.datetime.now() - dt.timedelta(days=days_ago)
-                    return post_date.strftime('%m/%d/%Y')
-        except:
-            continue
-    
-    # Fallback: search entire card text
     card_text = card.get_text()
-    date_patterns = [
-        r'Posted:?\s*(\d{1,2}/\d{1,2}/\d{4})',
-        r'Listed:?\s*(\d{1,2}/\d{1,2}/\d{4})',
-        r'(\d+)\s*days?\s*on\s*market',
-        r'(\d+)\s*days?\s*ago'
+    
+    # Look for Redfin's relative time formats like "1 HR AGO", "17 HRS AGO", "NEW 1 HR AGO"
+    time_patterns = [
+        r'(\d+)\s*HR\s*AGO',         # "1 HR AGO"
+        r'(\d+)\s*HRS\s*AGO',        # "17 HRS AGO"
+        r'(\d+)\s*MIN\s*AGO',        # "30 MIN AGO"
+        r'(\d+)\s*MINS\s*AGO',       # "45 MINS AGO"
+        r'(\d+)\s*DAY\s*AGO',        # "1 DAY AGO"
+        r'(\d+)\s*DAYS\s*AGO',       # "3 DAYS AGO"
+        r'NEW\s+(\d+)\s*HR\s*AGO',   # "NEW 1 HR AGO"
+        r'NEW\s+(\d+)\s*HRS\s*AGO',  # "NEW 17 HRS AGO"
+        r'NEW\s+(\d+)\s*MIN\s*AGO',  # "NEW 30 MIN AGO"
+        r'NEW\s+(\d+)\s*MINS\s*AGO', # "NEW 45 MINS AGO"
+        r'NEW\s+(\d+)\s*DAY\s*AGO',  # "NEW 1 DAY AGO"
+        r'NEW\s+(\d+)\s*DAYS\s*AGO'  # "NEW 3 DAYS AGO"
     ]
     
-    for pattern in date_patterns:
+    for pattern in time_patterns:
         match = re.search(pattern, card_text, re.IGNORECASE)
         if match:
             try:
-                if '/' in match.group(1):
-                    return match.group(1)
+                time_value = int(match.group(1))
+                now = dt.datetime.now()
+                
+                # Determine the time unit and calculate the post date
+                if 'HR' in pattern:
+                    post_datetime = now - dt.timedelta(hours=time_value)
+                elif 'MIN' in pattern:
+                    post_datetime = now - dt.timedelta(minutes=time_value)
+                elif 'DAY' in pattern:
+                    post_datetime = now - dt.timedelta(days=time_value)
                 else:
-                    # Days ago format
-                    days_ago = int(match.group(1))
-                    post_date = dt.datetime.now() - dt.timedelta(days=days_ago)
-                    return post_date.strftime('%m/%d/%Y')
-            except ValueError:
+                    continue
+                
+                # Return just the calendar date (no time)
+                return post_datetime.strftime('%m/%d/%Y')
+                
+            except (ValueError, TypeError):
                 continue
+    
+    # Fallback: look for traditional date formats
+    date_patterns = [
+        r'(\d{1,2}/\d{1,2}/\d{4})',
+        r'Posted:?\s*(\d{1,2}/\d{1,2}/\d{4})',
+        r'Listed:?\s*(\d{1,2}/\d{1,2}/\d{4})'
+    ]
+    
+    for pattern in date_patterns:
+        match = re.search(pattern, card_text)
+        if match:
+            return match.group(1)
     
     return ""
 
