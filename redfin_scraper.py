@@ -20,7 +20,7 @@ EMAIL SETUP:
   For Gmail (harder): Requires app password setup
 """
 
-import argparse, datetime as dt, logging, re, sys, time, os
+import argparse, datetime as dt, logging, re, sys, time, os, warnings
 import smtplib
 import schedule
 import pytz
@@ -32,7 +32,12 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
+
+# Suppress CSS selector warnings from BeautifulSoup
+warnings.filterwarnings("ignore", message=".*pseudo class.*deprecated.*", category=FutureWarning)
 from reportlab.lib.pagesizes import letter, A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -91,6 +96,28 @@ EMAIL_PROVIDERS = {
 }
 
 # ───── helpers ────────────────────────────────────────────────────────────────
+
+def create_robust_session():
+    """Create a requests session with retry logic and timeout handling."""
+    session = requests.Session()
+    
+    # Define retry strategy
+    retry_strategy = Retry(
+        total=3,                # Total number of retries
+        backoff_factor=1,       # Wait time between retries (1s, 2s, 4s)
+        status_forcelist=[429, 500, 502, 503, 504],  # HTTP status codes to retry on
+        raise_on_status=False   # Don't raise exception on HTTP errors
+    )
+    
+    # Mount adapter with retry strategy
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    return session
+
+# Global session for reuse
+ROBUST_SESSION = create_robust_session()
 def extract_street(card_addr: str | None, url_href: str) -> str:
     """Return street line without city/ZIP, e.g. '11628 N GALAHAD DR'."""
     if card_addr:
@@ -346,7 +373,9 @@ def fetch_redfin_properties() -> list[dict]:
     for source_name, url in REDFIN_SOURCES.items():
         logging.info("Fetching properties from %s...", source_name)
         try:
-            html = requests.get(url, headers=HDRS, timeout=30).text
+            response = ROBUST_SESSION.get(url, headers=HDRS, timeout=45)
+            response.raise_for_status()
+            html = response.text
             soup = BeautifulSoup(html, "html.parser")
             
             for card in soup.select("div.HomeCardContainer"):
@@ -431,18 +460,50 @@ def fetch_redfin_streets() -> list[str]:
     return [prop['street'] for prop in properties]
 
 def arcgis_pid(street: str) -> str | None:
+    """Get PID from SCOUT with robust error handling and retries."""
     params = {
         "f":"json",
         "where": f"site_address LIKE '{street}%'",
         "outFields":"PID_NUM",
         "returnGeometry":"false"
     }
-    js = requests.get(SCOUT_LAYER, params=params, timeout=30).json()
-    feats = js.get("features") or []
-    if not feats:
-        logging.warning("→ No PID for %r", street)
-        return None
-    return feats[0]["attributes"]["PID_NUM"]
+    
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            response = ROBUST_SESSION.get(SCOUT_LAYER, params=params, timeout=45)
+            response.raise_for_status()  # Raise exception for HTTP errors
+            js = response.json()
+            
+            feats = js.get("features") or []
+            if not feats:
+                logging.warning("→ No PID for %r", street)
+                return None
+            return feats[0]["attributes"]["PID_NUM"]
+            
+        except requests.exceptions.Timeout:
+            logging.warning("→ Timeout attempt %d/%d for PID lookup: %s", attempt + 1, max_attempts, street)
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                continue
+            else:
+                logging.error("→ Final timeout for PID lookup: %s", street)
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            logging.warning("→ Network error attempt %d/%d for PID lookup %s: %s", attempt + 1, max_attempts, street, str(e))
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+                continue
+            else:
+                logging.error("→ Final network error for PID lookup: %s", street)
+                return None
+                
+        except (KeyError, ValueError, TypeError) as e:
+            logging.error("→ Data parsing error for PID lookup %s: %s", street, str(e))
+            return None
+    
+    return None
 
 def extract_lot_size_from_scout(text: str) -> float:
     """Extract lot size in acres from SCOUT data."""
@@ -499,11 +560,42 @@ def extract_jurisdiction_from_scout(text: str, html: str) -> str:
     return "Unknown"
 
 def legal_for_pid(pid: str) -> tuple[str, str, str]:
-    """Updated to also return jurisdiction information."""
-    html = requests.get(SCOUT_SUMMARY.format(pid), headers=HDRS, timeout=30).text
-    text = BeautifulSoup(html, "html.parser").get_text(separator="\n")
-    jurisdiction = extract_jurisdiction_from_scout(text, html)
-    return text, html, jurisdiction
+    """Get legal description from SCOUT with robust error handling and retries."""
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            response = ROBUST_SESSION.get(SCOUT_SUMMARY.format(pid), headers=HDRS, timeout=45)
+            response.raise_for_status()  # Raise exception for HTTP errors
+            html = response.text
+            
+            text = BeautifulSoup(html, "html.parser").get_text(separator="\n")
+            jurisdiction = extract_jurisdiction_from_scout(text, html)
+            return text, html, jurisdiction
+            
+        except requests.exceptions.Timeout:
+            logging.warning("→ Timeout attempt %d/%d for SCOUT summary PID %s", attempt + 1, max_attempts, pid)
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                continue
+            else:
+                logging.error("→ Final timeout for SCOUT summary PID %s", pid)
+                # Return empty data to allow processing to continue
+                return "", "", "Unknown"
+                
+        except requests.exceptions.RequestException as e:
+            logging.warning("→ Network error attempt %d/%d for SCOUT summary PID %s: %s", attempt + 1, max_attempts, pid, str(e))
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+                continue
+            else:
+                logging.error("→ Final network error for SCOUT summary PID %s", pid)
+                return "", "", "Unknown"
+                
+        except Exception as e:
+            logging.error("→ Parsing error for SCOUT summary PID %s: %s", pid, str(e))
+            return "", "", "Unknown"
+    
+    return "", "", "Unknown"
 
 def should_skip_property(legal_desc: str) -> bool:
     """Check if property should be skipped based on Aaron's filter criteria."""
@@ -1127,6 +1219,8 @@ def run_main_logic(args):
 
     rows = []
     skipped_count = 0
+    failed_count = 0
+    
     for i, prop in enumerate(properties,1):
         street = prop['street']
         redfin_sqft = prop['sqft']
@@ -1140,51 +1234,90 @@ def run_main_logic(args):
                     f"{price:,}" if price > 0 else "N/A",
                     post_date or "N/A")
         
-        pid = arcgis_pid(street)
-        if not pid:
+        try:
+            # Get PID with robust error handling
+            pid = arcgis_pid(street)
+            if not pid:
+                failed_count += 1
+                logging.warning("→ Skipping %s - no PID found", street)
+                continue
+                
+            # Get SCOUT data with robust error handling  
+            full_text, html, jurisdiction = legal_for_pid(pid)
+            
+            # If SCOUT data completely failed, use fallback values but continue processing
+            if not full_text:
+                logging.warning("→ No SCOUT data for %s (PID: %s) - using fallback values", street, pid)
+                full_text = f"PROPERTY: {street}"  # Minimal text for keyword analysis
+                jurisdiction = "Unknown"
+            
+            # Extract lot size and square footage from SCOUT data (more reliable than Redfin)
+            scout_lot_size_acres = extract_lot_size_from_scout(full_text)
+            scout_sqft = extract_square_footage(full_text)
+            
+            # Use Redfin data as fallback if SCOUT data is missing
+            if scout_lot_size_acres == 0.0 and lot_size_acres > 0:
+                scout_lot_size_acres = lot_size_acres
+                logging.info("→ Using Redfin lot size as fallback: %.3f acres", scout_lot_size_acres)
+                
+            if scout_sqft == 0 and redfin_sqft > 0:
+                scout_sqft = redfin_sqft
+                logging.info("→ Using Redfin sqft as fallback: %d sqft", scout_sqft)
+            
+            logging.info("→ SCOUT data: %d sqft | %.3f acres | %s jurisdiction", 
+                        scout_sqft, scout_lot_size_acres, jurisdiction)
+            
+            # Extract legal description between 'Active' and 'Appraisal'
+            legal_desc = ""
+            try:
+                if full_text:
+                    start = full_text.index("Active") + len("Active")
+                    end = full_text.index("Appraisal", start)
+                    legal_desc = full_text[start:end].strip()
+            except ValueError:
+                legal_desc = full_text.strip() if full_text else f"Property at {street}"
+            
+            # Apply Aaron's filter: skip short plat and long plat properties
+            if should_skip_property(legal_desc):
+                skipped_count += 1
+                logging.info("→ Skipped (contains short/long plat): %s", street)
+                continue
+            
+            # Create the row with all data
+            rows.append({
+                "street": street,
+                "pid": pid,
+                "legal_description": legal_desc,
+                "sqft": scout_sqft,  # SCOUT data with Redfin fallback
+                "price": price,
+                "lot_size_acres": scout_lot_size_acres,  # SCOUT data with Redfin fallback
+                "post_date": post_date,
+                "source": source,
+                "jurisdiction": jurisdiction,
+                "full_page_text": full_text,
+                **enhanced_kw_counts(full_text, scout_sqft)  # Use best available sqft for keyword analysis
+            })
+            
+        except Exception as e:
+            failed_count += 1
+            logging.error("→ Unexpected error processing %s: %s", street, str(e))
+            logging.info("→ Continuing with next property...")
             continue
             
-        full_text, html, jurisdiction = legal_for_pid(pid)
-        
-        # Extract lot size and square footage from SCOUT data (more reliable than Redfin)
-        scout_lot_size_acres = extract_lot_size_from_scout(full_text)
-        scout_sqft = extract_square_footage(full_text)
-        
-        logging.info("→ SCOUT data: %d sqft | %.3f acres | %s jurisdiction", 
-                    scout_sqft, scout_lot_size_acres, jurisdiction)
-        
-        # Extract legal description between 'Active' and 'Appraisal'
-        legal_desc = ""
-        try:
-            start = full_text.index("Active") + len("Active")
-            end = full_text.index("Appraisal", start)
-            legal_desc = full_text[start:end].strip()
-        except ValueError:
-            legal_desc = full_text.strip()
-        
-        # Apply Aaron's filter: skip short plat and long plat properties
-        if should_skip_property(legal_desc):
-            skipped_count += 1
-            logging.info("→ Skipped (contains short/long plat): %s", street)
-            continue
-        
-        rows.append({
-            "street": street,
-            "pid": pid,
-            "legal_description": legal_desc,
-            "sqft": scout_sqft,  # Now using SCOUT data  
-            "price": price,
-            "lot_size_acres": scout_lot_size_acres,  # Now using SCOUT data
-            "post_date": post_date,
-            "source": source,
-            "jurisdiction": jurisdiction,
-            "full_page_text": full_text,
-            **enhanced_kw_counts(full_text, scout_sqft)  # Use SCOUT sqft for keyword analysis
-        })
         time.sleep(0.3)   # polite throttle
     
+    # Summary logging
+    total_processed = len(properties)
+    successful = len(rows)
+    
+    logging.info("═══ PROCESSING SUMMARY ═══")
+    logging.info("Total properties found: %d", total_processed)
+    logging.info("Successfully processed: %d", successful)
+    if failed_count > 0:
+        logging.info("Failed (network/timeout): %d", failed_count)
     if skipped_count > 0:
-        logging.info("Skipped %d properties containing short/long plat", skipped_count)
+        logging.info("Skipped (short/long plat): %d", skipped_count)
+    logging.info("Success rate: %.1f%%", (successful / total_processed * 100) if total_processed > 0 else 0)
 
     if not rows:
         logging.error("No data collected; exiting.")
