@@ -366,6 +366,204 @@ def extract_post_date_from_card(card) -> str:
     # Default fallback: assume listing posted today when no patterns matched
     return dt.datetime.now().strftime('%m/%d/%Y')
 
+def extract_bedrooms_from_card(card) -> int:
+    """Extract number of bedrooms from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for bedroom patterns
+    bedroom_patterns = [
+        r'(\d+)\s*beds?\b',           # "3 beds" or "3 bed"
+        r'(\d+)\s*BD\b',              # "3 BD"
+        r'(\d+)\s*BR\b',              # "3 BR"
+        r'(\d+)\s*BDRM\b',            # "3 BDRM"
+        r'(\d+)\s*bedroom\b',         # "3 bedroom"
+        r'(\d+)\s*bedrooms?\b',       # "3 bedrooms"
+        r'Beds:?\s*(\d+)',            # "Beds: 3"
+        r'Bedrooms:?\s*(\d+)',        # "Bedrooms: 3"
+    ]
+    
+    for pattern in bedroom_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                beds = int(match.group(1))
+                # Sanity check - reasonable bedroom count
+                if 0 <= beds <= 20:
+                    return beds
+            except (ValueError, TypeError):
+                continue
+    
+    return 0
+
+def extract_bathrooms_from_card(card) -> float:
+    """Extract number of bathrooms from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for bathroom patterns
+    bathroom_patterns = [
+        r'(\d+\.?\d*)\s*baths?\b',       # "2.5 baths" or "2 bath"
+        r'(\d+\.?\d*)\s*BA\b',           # "2.5 BA"
+        r'(\d+\.?\d*)\s*bathroom\b',     # "2 bathroom"
+        r'(\d+\.?\d*)\s*bathrooms?\b',   # "2.5 bathrooms"
+        r'Baths:?\s*(\d+\.?\d*)',        # "Baths: 2.5"
+        r'Bathrooms:?\s*(\d+\.?\d*)',    # "Bathrooms: 2.5"
+    ]
+    
+    for pattern in bathroom_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                baths = float(match.group(1))
+                # Sanity check - reasonable bathroom count
+                if 0 <= baths <= 20:
+                    return baths
+            except (ValueError, TypeError):
+                continue
+    
+    return 0.0
+
+def extract_property_type_from_card(card) -> str:
+    """Extract property type from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for property type patterns
+    property_types = [
+        'Single Family',
+        'Single-Family',
+        'Townhouse',
+        'Townhome',
+        'Condo',
+        'Condominium',
+        'Multi-Family',
+        'Duplex',
+        'Triplex',
+        'Fourplex',
+        'Apartment',
+        'Mobile Home',
+        'Manufactured Home',
+        'Vacant Land',
+        'Land',
+        'Commercial'
+    ]
+    
+    # Check for each property type
+    for prop_type in property_types:
+        if re.search(rf'\b{re.escape(prop_type)}\b', card_text, re.IGNORECASE):
+            return prop_type
+    
+    # Look for generic patterns
+    generic_patterns = [
+        r'House\b',
+        r'Home\b',
+        r'Residence\b'
+    ]
+    
+    for pattern in generic_patterns:
+        if re.search(pattern, card_text, re.IGNORECASE):
+            return 'Single Family'  # Default assumption
+    
+    return 'Unknown'
+
+def extract_year_built_from_card(card) -> int:
+    """Extract year built from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for year built patterns
+    year_patterns = [
+        r'Built in (\d{4})',          # "Built in 1995"
+        r'Built:?\s*(\d{4})',         # "Built: 1995"
+        r'Year Built:?\s*(\d{4})',    # "Year Built: 1995"
+        r'(\d{4})\s*Built',           # "1995 Built"
+        r'Yr Built:?\s*(\d{4})',      # "Yr Built: 1995"
+    ]
+    
+    for pattern in year_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                year = int(match.group(1))
+                # Sanity check - reasonable year range
+                current_year = dt.datetime.now().year
+                if 1800 <= year <= current_year + 5:  # Allow for new construction
+                    return year
+            except (ValueError, TypeError):
+                continue
+    
+    return 0
+
+def extract_days_on_market_from_card(card) -> int:
+    """Extract days on market from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for days on market patterns
+    dom_patterns = [
+        r'(\d+)\s*days?\s*on\s*Redfin',    # "5 days on Redfin"
+        r'(\d+)\s*days?\s*on\s*market',    # "5 days on market"
+        r'(\d+)\s*DOM\b',                  # "5 DOM"
+        r'On market:?\s*(\d+)\s*days?',    # "On market: 5 days"
+        r'Days on market:?\s*(\d+)',       # "Days on market: 5"
+    ]
+    
+    for pattern in dom_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                days = int(match.group(1))
+                # Sanity check - reasonable days on market
+                if 0 <= days <= 3650:  # Max 10 years
+                    return days
+            except (ValueError, TypeError):
+                continue
+    
+    return 0
+
+def extract_garage_parking_from_card(card) -> str:
+    """Extract garage/parking information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for garage/parking patterns
+    garage_patterns = [
+        r'(\d+)\s*-?\s*car\s*garage',      # "2-car garage" or "2 car garage"
+        r'(\d+)\s*garage',                 # "2 garage"
+        r'garage:?\s*(\d+)',               # "Garage: 2"
+        r'(\d+)\s*bay\s*garage',           # "2 bay garage"
+        r'(\d+)\s*stall\s*garage',         # "2 stall garage"
+        r'parking:?\s*(\d+)',              # "Parking: 2"
+        r'(\d+)\s*parking\s*spaces?',      # "2 parking spaces"
+        r'(\d+)\s*spaces?',                # "2 spaces"
+    ]
+    
+    for pattern in garage_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                spaces = int(match.group(1))
+                # Sanity check - reasonable parking count
+                if 0 <= spaces <= 20:
+                    if 'garage' in pattern:
+                        return f"{spaces}-car garage"
+                    else:
+                        return f"{spaces} parking spaces"
+            except (ValueError, TypeError):
+                continue
+    
+    # Look for text indicators
+    parking_indicators = [
+        'Attached Garage',
+        'Detached Garage',
+        'Carport',
+        'Covered Parking',
+        'No Garage',
+        'Garage Available',
+        'Parking Available'
+    ]
+    
+    for indicator in parking_indicators:
+        if re.search(rf'\b{re.escape(indicator)}\b', card_text, re.IGNORECASE):
+            return indicator
+    
+    return 'Unknown'
+
 def fetch_redfin_properties() -> list[dict]:
     """Fetch Redfin properties from both Spokane City and County with enhanced data."""
     all_properties = []
@@ -435,12 +633,26 @@ def fetch_redfin_properties() -> list[dict]:
                 lot_size_acres = extract_lot_size_from_card(card)
                 post_date = extract_post_date_from_card(card)
                 
+                # Extract additional property details
+                bedrooms = extract_bedrooms_from_card(card)
+                bathrooms = extract_bathrooms_from_card(card)
+                property_type = extract_property_type_from_card(card)
+                year_built = extract_year_built_from_card(card)
+                days_on_market = extract_days_on_market_from_card(card)
+                garage_parking = extract_garage_parking_from_card(card)
+                
                 all_properties.append({
                     'street': street,
                     'sqft': sqft,
                     'price': price,
                     'lot_size_acres': lot_size_acres,
                     'post_date': post_date,
+                    'bedrooms': bedrooms,
+                    'bathrooms': bathrooms,
+                    'property_type': property_type,
+                    'year_built': year_built,
+                    'days_on_market': days_on_market,
+                    'garage_parking': garage_parking,
                     'source': source_name  # Track which source this came from
                 })
             
@@ -1228,10 +1440,17 @@ def run_main_logic(args):
         lot_size_acres = prop['lot_size_acres']
         post_date = prop['post_date']
         source = prop['source']
+        bedrooms = prop['bedrooms']
+        bathrooms = prop['bathrooms']
+        property_type = prop['property_type']
+        year_built = prop['year_built']
+        days_on_market = prop['days_on_market']
+        garage_parking = prop['garage_parking']
         
-        logging.info("[%d/%d] %s (Source: %s | Price: $%s | Posted: %s)", 
+        logging.info("[%d/%d] %s (Source: %s | Price: $%s | %dBR/%sBA | %s | Posted: %s)", 
                     i, len(properties), street, source, 
                     f"{price:,}" if price > 0 else "N/A",
+                    bedrooms, bathrooms, property_type,
                     post_date or "N/A")
         
         try:
@@ -1292,6 +1511,12 @@ def run_main_logic(args):
                 "price": price,
                 "lot_size_acres": scout_lot_size_acres,  # SCOUT data with Redfin fallback
                 "post_date": post_date,
+                "bedrooms": bedrooms,
+                "bathrooms": bathrooms,
+                "property_type": property_type,
+                "year_built": year_built,
+                "days_on_market": days_on_market,
+                "garage_parking": garage_parking,
                 "source": source,
                 "jurisdiction": jurisdiction,
                 "full_page_text": full_text,
