@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """
 redfin_spokane_to_scout.py
-• Scrape Redfin active Spokane listings
+• Scrape Redfin active Spokane listings with COMPREHENSIVE field extraction (25+ property details)
 • Resolve each street to a PID with SCOUT/PropertyLookup
 • Pull the short plat / lot-block legal description from the SCOUT summary page
 • Count keywords (incl. every "L0…L99") and export to Excel with enhanced visualizations
 • Email results with Excel and PDF attachments
+
+NEW COMPREHENSIVE FIELD EXTRACTION:
+• Basic: price, sqft, beds/baths, property type, year built, days on market
+• Financial: HOA fees, property taxes, monthly payment estimates, price per sqft
+• Features: fireplace, pool/spa, basement, stories, heating/cooling, flooring
+• Location: neighborhood, school district, utilities, walk score, view details
+• Marketing: listing agent, MLS number, listing status, photo count, open house
+• Additional: appliances, fence, garage details, previous price, and more!
 
 USAGE EXAMPLES:
   python redfin_scraper.py                     # Creates HTML email preview (safe test mode)
@@ -20,7 +28,7 @@ EMAIL SETUP:
   For Gmail (harder): Requires app password setup
 """
 
-import argparse, datetime as dt, logging, re, sys, time, os, warnings
+import argparse, datetime as dt, logging, re, time, os, warnings
 import smtplib
 import schedule
 import pytz
@@ -38,7 +46,7 @@ from bs4 import BeautifulSoup
 
 # Suppress CSS selector warnings from BeautifulSoup
 warnings.filterwarnings("ignore", message=".*pseudo class.*deprecated.*", category=FutureWarning)
-from reportlab.lib.pagesizes import letter, A4, landscape
+from reportlab.lib.pagesizes import letter, landscape
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -56,8 +64,8 @@ HDRS          = {"User-Agent": "Mozilla/5.0"}
 
 # Multiple Redfin URLs for different jurisdictions
 REDFIN_SOURCES = {
-    "Spokane City": "https://www.redfin.com/city/17154/WA/Spokane/filter/status=active",
-    "Spokane County": "https://www.redfin.com/county/1736/WA/Spokane-County/filter/status=active"
+    "Spokane City": "https://www.redfin.com/city/17154/WA/Spokane/filter/sort=lo-days",
+    "Spokane County": "https://www.redfin.com/county/3100/WA/Spokane-County/filter/sort=lo-days"
 }
 
 SLUG_RE       = re.compile(r"/WA/Spokane/([^/]+)/home")
@@ -67,9 +75,6 @@ SCOUT_LAYER   = ("https://gismo.spokanecounty.org/arcgis/rest/services/"
 SCOUT_SUMMARY = ("https://cp.spokanecounty.org/SCOUT/propertyinformation/"
                  "Summary.aspx?PID={} ")
 
-# capture strings like "FAIRWOOD CREST NO 4 L23 B2"
-LEGAL_RE_HTML = re.compile(r">\s*([A-Z0-9 ]+ L\d{1,2} B\d+)\s*<")
-
 # Updated keywords per Aaron's requirements
 KEYWORDS_BASE = [
     " LT","LTS"," L ","LOTS","THRU"," TO ",
@@ -78,10 +83,6 @@ KEYWORDS_BASE = [
     # ">=1500","RANCH",">=1500&RANCH"  # Commented out - not needed for keyword analysis
 ]
 KEYWORDS      = KEYWORDS_BASE + [f"L{i}" for i in range(100)]   # L0 … L99
-
-# Additional Scout search functionality
-SCOUT_SEARCH_URL = ("https://gismo.spokanecounty.org/arcgis/rest/services/"
-                   "SCOUT/PropertyLookup/MapServer/0/query")
 
 # Email configuration
 SMTP_SERVER = "smtp.gmail.com"
@@ -564,6 +565,669 @@ def extract_garage_parking_from_card(card) -> str:
     
     return 'Unknown'
 
+def extract_mls_number_from_card(card) -> str:
+    """Extract MLS number from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for MLS patterns
+    mls_patterns = [
+        r'MLS\s*#?\s*[:\-]?\s*([A-Z0-9]+)',      # "MLS #123456" or "MLS: 123456"
+        r'MLS\s*ID\s*[:\-]?\s*([A-Z0-9]+)',      # "MLS ID: 123456"
+        r'List\s*#\s*([A-Z0-9]+)',               # "List #123456"
+        r'Listing\s*#\s*([A-Z0-9]+)',            # "Listing #123456"
+        r'ID\s*[:\-]?\s*([A-Z0-9]{6,})',         # "ID: 123456"
+    ]
+    
+    for pattern in mls_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            mls_id = match.group(1)
+            if len(mls_id) >= 4:  # Reasonable MLS number length
+                return mls_id
+    
+    return 'Unknown'
+
+def extract_hoa_fee_from_card(card) -> str:
+    """Extract HOA fee from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for HOA patterns
+    hoa_patterns = [
+        r'HOA\s*[:\-]?\s*\$([0-9,]+)(?:/mo|/month)?',     # "HOA: $150/mo"
+        r'HOA\s*Fee\s*[:\-]?\s*\$([0-9,]+)',             # "HOA Fee: $150"
+        r'Association\s*Fee\s*[:\-]?\s*\$([0-9,]+)',      # "Association Fee: $150"
+        r'\$([0-9,]+)\s*HOA',                             # "$150 HOA"
+        r'HOA\s*[:\-]?\s*([0-9,]+)',                      # "HOA: 150"
+    ]
+    
+    for pattern in hoa_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                fee = match.group(1).replace(',', '')
+                hoa_amount = int(fee)
+                if 0 <= hoa_amount <= 10000:  # Reasonable HOA range
+                    return f"${hoa_amount}"
+            except (ValueError, TypeError):
+                continue
+    
+    # Look for "No HOA" indicators
+    no_hoa_patterns = [
+        r'No\s*HOA',
+        r'HOA\s*None',
+        r'No\s*Association',
+        r'HOA\s*N/A'
+    ]
+    
+    for pattern in no_hoa_patterns:
+        if re.search(pattern, card_text, re.IGNORECASE):
+            return 'No HOA'
+    
+    return 'Unknown'
+
+def extract_property_taxes_from_card(card) -> str:
+    """Extract property tax information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for property tax patterns
+    tax_patterns = [
+        r'Property\s*Tax\s*[:\-]?\s*\$([0-9,]+)(?:/yr|/year)?',    # "Property Tax: $3,500/yr"
+        r'Tax\s*[:\-]?\s*\$([0-9,]+)(?:/yr|/year)?',              # "Tax: $3,500/yr"
+        r'Annual\s*Tax\s*[:\-]?\s*\$([0-9,]+)',                   # "Annual Tax: $3,500"
+        r'Taxes\s*[:\-]?\s*\$([0-9,]+)',                          # "Taxes: $3,500"
+        r'\$([0-9,]+)\s*(?:property\s*)?tax',                     # "$3,500 property tax"
+    ]
+    
+    for pattern in tax_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                tax_str = match.group(1).replace(',', '')
+                tax_amount = int(tax_str)
+                if 0 <= tax_amount <= 100000:  # Reasonable tax range
+                    return f"${tax_amount:,}"
+            except (ValueError, TypeError):
+                continue
+    
+    return 'Unknown'
+
+def extract_stories_from_card(card) -> str:
+    """Extract number of stories from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for story patterns
+    story_patterns = [
+        r'(\d+)\s*Story',                    # "2 Story"
+        r'(\d+)\s*Stories',                  # "2 Stories"
+        r'(\d+)\s*Level',                    # "2 Level"
+        r'(\d+)\s*Levels',                   # "2 Levels"
+        r'Stories?\s*[:\-]?\s*(\d+)',        # "Stories: 2"
+        r'Levels?\s*[:\-]?\s*(\d+)',         # "Levels: 2"
+    ]
+    
+    for pattern in story_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                stories = int(match.group(1))
+                if 1 <= stories <= 5:  # Reasonable story count
+                    return str(stories)
+            except (ValueError, TypeError):
+                continue
+    
+    # Look for text indicators
+    story_indicators = [
+        'Single Story',
+        'One Story',
+        'Two Story',
+        'Multi-Level',
+        'Split Level',
+        'Tri-Level'
+    ]
+    
+    for indicator in story_indicators:
+        if re.search(rf'\b{re.escape(indicator)}\b', card_text, re.IGNORECASE):
+            return indicator
+    
+    return 'Unknown'
+
+def extract_basement_from_card(card) -> str:
+    """Extract basement information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for basement patterns
+    basement_patterns = [
+        'Finished Basement',
+        'Unfinished Basement',
+        'Partial Basement',
+        'Full Basement',
+        'Walkout Basement',
+        'Daylight Basement',
+        'Basement'
+    ]
+    
+    for pattern in basement_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            return pattern
+    
+    # Look for "No Basement" indicators
+    no_basement_patterns = [
+        'No Basement',
+        'Slab Foundation',
+        'Crawl Space'
+    ]
+    
+    for pattern in no_basement_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            return pattern
+    
+    return 'Unknown'
+
+def extract_heating_cooling_from_card(card) -> str:
+    """Extract heating and cooling system information."""
+    card_text = card.get_text()
+    
+    # Look for HVAC patterns
+    hvac_patterns = [
+        'Central Air',
+        'Forced Air',
+        'Heat Pump',
+        'Radiant Heat',
+        'Baseboard Heat',
+        'Geothermal',
+        'Electric Heat',
+        'Gas Heat',
+        'Oil Heat',
+        'Solar Heat',
+        'AC',
+        'A/C',
+        'Air Conditioning',
+        'Heating',
+        'Cooling'
+    ]
+    
+    found_systems = []
+    for pattern in hvac_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            found_systems.append(pattern)
+    
+    if found_systems:
+        return ', '.join(found_systems[:3])  # Limit to first 3 to avoid clutter
+    
+    return 'Unknown'
+
+def extract_flooring_from_card(card) -> str:
+    """Extract flooring information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for flooring patterns
+    flooring_patterns = [
+        'Hardwood',
+        'Laminate',
+        'Vinyl',
+        'Carpet',
+        'Tile',
+        'Stone',
+        'Concrete',
+        'Bamboo',
+        'Cork',
+        'Linoleum',
+        'Marble',
+        'Granite',
+        'Engineered Wood'
+    ]
+    
+    found_flooring = []
+    for pattern in flooring_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            found_flooring.append(pattern)
+    
+    if found_flooring:
+        return ', '.join(found_flooring[:3])  # Limit to first 3
+    
+    return 'Unknown'
+
+def extract_appliances_from_card(card) -> str:
+    """Extract appliances information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for appliance patterns
+    appliance_patterns = [
+        'Refrigerator',
+        'Dishwasher',
+        'Washer',
+        'Dryer',
+        'Microwave',
+        'Oven',
+        'Stove',
+        'Range',
+        'Disposal',
+        'Freezer',
+        'Wine Cooler',
+        'All Appliances'
+    ]
+    
+    found_appliances = []
+    for pattern in appliance_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            found_appliances.append(pattern)
+    
+    if found_appliances:
+        return ', '.join(found_appliances[:4])  # Limit to first 4
+    
+    return 'Unknown'
+
+def extract_fireplace_from_card(card) -> str:
+    """Extract fireplace information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for fireplace patterns
+    fireplace_patterns = [
+        r'(\d+)\s*Fireplace',                # "2 Fireplace"
+        r'(\d+)\s*Fireplaces',               # "2 Fireplaces"
+        r'Fireplace\s*[:\-]?\s*(\d+)',       # "Fireplace: 2"
+        r'Fireplaces\s*[:\-]?\s*(\d+)',      # "Fireplaces: 2"
+    ]
+    
+    for pattern in fireplace_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                count = int(match.group(1))
+                if 1 <= count <= 10:  # Reasonable fireplace count
+                    return f"{count} Fireplace{'s' if count > 1 else ''}"
+            except (ValueError, TypeError):
+                continue
+    
+    # Look for fireplace types
+    fireplace_types = [
+        'Wood Fireplace',
+        'Gas Fireplace',
+        'Electric Fireplace',
+        'Fireplace',
+        'Wood Burning',
+        'Gas Burning'
+    ]
+    
+    for ftype in fireplace_types:
+        if re.search(rf'\b{re.escape(ftype)}\b', card_text, re.IGNORECASE):
+            return ftype
+    
+    # Look for "No Fireplace"
+    if re.search(r'No\s*Fireplace', card_text, re.IGNORECASE):
+        return 'No Fireplace'
+    
+    return 'Unknown'
+
+def extract_pool_spa_from_card(card) -> str:
+    """Extract pool and spa information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for pool/spa patterns
+    pool_spa_patterns = [
+        'Swimming Pool',
+        'Pool',
+        'Spa',
+        'Hot Tub',
+        'Jacuzzi',
+        'In-Ground Pool',
+        'Above Ground Pool',
+        'Heated Pool',
+        'Saltwater Pool'
+    ]
+    
+    found_features = []
+    for pattern in pool_spa_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            found_features.append(pattern)
+    
+    if found_features:
+        return ', '.join(found_features[:3])  # Limit to first 3
+    
+    return 'Unknown'
+
+def extract_view_from_card(card) -> str:
+    """Extract view information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for view patterns
+    view_patterns = [
+        'Mountain View',
+        'Water View',
+        'City View',
+        'Lake View',
+        'River View',
+        'Golf Course View',
+        'Park View',
+        'Greenbelt View',
+        'Valley View',
+        'Panoramic View',
+        'Territorial View',
+        'Partial View',
+        'Peek View',
+        'View'
+    ]
+    
+    found_views = []
+    for pattern in view_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            found_views.append(pattern)
+    
+    if found_views:
+        return ', '.join(found_views[:3])  # Limit to first 3
+    
+    return 'Unknown'
+
+def extract_listing_agent_from_card(card) -> str:
+    """Extract listing agent information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for agent patterns
+    agent_patterns = [
+        r'Listed\s*by\s*([A-Za-z\s\.,]+)',       # "Listed by John Doe"
+        r'Agent\s*[:\-]?\s*([A-Za-z\s\.,]+)',    # "Agent: John Doe"
+        r'Listing\s*Agent\s*[:\-]?\s*([A-Za-z\s\.,]+)',  # "Listing Agent: John Doe"
+        r'Contact\s*([A-Za-z\s\.,]+)',           # "Contact John Doe"
+    ]
+    
+    for pattern in agent_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            agent = match.group(1).strip()
+            # Clean up common suffixes
+            agent = re.sub(r'\s*(Realty|Real Estate|Realtor|Agent).*$', '', agent, flags=re.IGNORECASE)
+            if len(agent) > 3 and len(agent) < 50:  # Reasonable agent name length
+                return agent
+    
+    return 'Unknown'
+
+def extract_listing_status_from_card(card) -> str:
+    """Extract listing status from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for status patterns
+    status_patterns = [
+        'Active',
+        'Pending',
+        'Under Contract',
+        'Sold',
+        'Off Market',
+        'Withdrawn',
+        'Expired',
+        'Coming Soon',
+        'New',
+        'Price Reduced',
+        'Back on Market',
+        'Contingent'
+    ]
+    
+    for pattern in status_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            return pattern
+    
+    return 'Active'  # Default assumption for Redfin listings
+
+def extract_price_per_sqft_from_card(card) -> str:
+    """Extract price per square foot from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for price per sqft patterns
+    price_sqft_patterns = [
+        r'\$([0-9,]+)\s*/?s?q?f?t?',           # "$150/sqft" or "$150 sqft"
+        r'([0-9,]+)\s*/?s?q?f?t?',             # "150/sqft" or "150 sqft"
+        r'Price\s*per\s*sq\s*ft\s*[:\-]?\s*\$?([0-9,]+)',  # "Price per sq ft: $150"
+    ]
+    
+    for pattern in price_sqft_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                price_str = match.group(1).replace(',', '')
+                price = int(price_str)
+                if 50 <= price <= 1000:  # Reasonable price per sqft range
+                    return f"${price}"
+            except (ValueError, TypeError):
+                continue
+    
+    return 'Unknown'
+
+def extract_school_district_from_card(card) -> str:
+    """Extract school district information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for school district patterns
+    school_patterns = [
+        r'School\s*District\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',     # "School District: ABC"
+        r'District\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',             # "District: ABC"
+        r'Schools?\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',             # "School: ABC"
+        r'Elementary\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',           # "Elementary: ABC"
+        r'Middle\s*School\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',      # "Middle School: ABC"
+        r'High\s*School\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',        # "High School: ABC"
+    ]
+    
+    for pattern in school_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            school = match.group(1).strip()
+            if len(school) > 3 and len(school) < 100:  # Reasonable school name length
+                return school
+    
+    return 'Unknown'
+
+def extract_utilities_from_card(card) -> str:
+    """Extract utilities information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for utility patterns
+    utility_patterns = [
+        'Public Water',
+        'Well Water',
+        'City Water',
+        'Public Sewer',
+        'Septic',
+        'Private Sewer',
+        'Electric',
+        'Gas',
+        'Propane',
+        'Oil',
+        'Solar',
+        'Cable Ready',
+        'Fiber Optic',
+        'High Speed Internet'
+    ]
+    
+    found_utilities = []
+    for pattern in utility_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            found_utilities.append(pattern)
+    
+    if found_utilities:
+        return ', '.join(found_utilities[:4])  # Limit to first 4
+    
+    return 'Unknown'
+
+def extract_neighborhood_from_card(card) -> str:
+    """Extract neighborhood/subdivision information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for neighborhood patterns
+    neighborhood_patterns = [
+        r'Neighborhood\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',         # "Neighborhood: ABC"
+        r'Subdivision\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',          # "Subdivision: ABC"
+        r'Community\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',            # "Community: ABC"
+        r'Development\s*[:\-]?\s*([A-Za-z0-9\s\-]+)',          # "Development: ABC"
+    ]
+    
+    for pattern in neighborhood_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            neighborhood = match.group(1).strip()
+            if len(neighborhood) > 3 and len(neighborhood) < 100:  # Reasonable name length
+                return neighborhood
+    
+    return 'Unknown'
+
+def extract_open_house_from_card(card) -> str:
+    """Extract open house information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for open house patterns
+    open_house_patterns = [
+        r'Open\s*House\s*[:\-]?\s*([A-Za-z0-9\s\-\/,:]+)',     # "Open House: Sat 1-3pm"
+        r'Open\s*([A-Za-z0-9\s\-\/,:]+)',                      # "Open Sat 1-3pm"
+        r'Tour\s*[:\-]?\s*([A-Za-z0-9\s\-\/,:]+)',             # "Tour: Available"
+    ]
+    
+    for pattern in open_house_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            open_house = match.group(1).strip()
+            if len(open_house) > 3 and len(open_house) < 100:  # Reasonable length
+                return open_house
+    
+    # Look for simple indicators
+    open_house_indicators = [
+        'Virtual Tour',
+        'Online Tour',
+        '3D Tour',
+        'Video Tour',
+        'Open House',
+        'Tour Available'
+    ]
+    
+    for indicator in open_house_indicators:
+        if re.search(rf'\b{re.escape(indicator)}\b', card_text, re.IGNORECASE):
+            return indicator
+    
+    return 'Unknown'
+
+def extract_previous_price_from_card(card) -> str:
+    """Extract previous/original price information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for previous price patterns
+    price_patterns = [
+        r'Was\s*\$([0-9,]+)',                    # "Was $450,000"
+        r'Originally\s*\$([0-9,]+)',             # "Originally $450,000"
+        r'Previous\s*Price\s*[:\-]?\s*\$([0-9,]+)',  # "Previous Price: $450,000"
+        r'Reduced\s*from\s*\$([0-9,]+)',         # "Reduced from $450,000"
+        r'Price\s*Drop\s*[:\-]?\s*\$([0-9,]+)',  # "Price Drop: $450,000"
+    ]
+    
+    for pattern in price_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                price_str = match.group(1).replace(',', '')
+                price = int(price_str)
+                if 50000 <= price <= 50000000:  # Reasonable price range
+                    return f"${price:,}"
+            except (ValueError, TypeError):
+                continue
+    
+    return 'Unknown'
+
+def extract_walk_score_from_card(card) -> str:
+    """Extract walk score information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for walk score patterns
+    walk_score_patterns = [
+        r'Walk\s*Score\s*[:\-]?\s*(\d+)',        # "Walk Score: 75"
+        r'Walkability\s*[:\-]?\s*(\d+)',         # "Walkability: 75"
+        r'(\d+)\s*Walk\s*Score',                 # "75 Walk Score"
+    ]
+    
+    for pattern in walk_score_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                score = int(match.group(1))
+                if 0 <= score <= 100:  # Walk score range
+                    return str(score)
+            except (ValueError, TypeError):
+                continue
+    
+    return 'Unknown'
+
+def extract_monthly_payment_from_card(card) -> str:
+    """Extract estimated monthly payment from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for monthly payment patterns
+    payment_patterns = [
+        r'Monthly\s*Payment\s*[:\-]?\s*\$([0-9,]+)',     # "Monthly Payment: $2,500"
+        r'Est\s*Payment\s*[:\-]?\s*\$([0-9,]+)',         # "Est Payment: $2,500"
+        r'Payment\s*[:\-]?\s*\$([0-9,]+)/mo',            # "Payment: $2,500/mo"
+        r'\$([0-9,]+)/mo',                               # "$2,500/mo"
+    ]
+    
+    for pattern in payment_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                payment_str = match.group(1).replace(',', '')
+                payment = int(payment_str)
+                if 500 <= payment <= 50000:  # Reasonable payment range
+                    return f"${payment:,}"
+            except (ValueError, TypeError):
+                continue
+    
+    return 'Unknown'
+
+def extract_photo_count_from_card(card) -> str:
+    """Extract photo count from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for photo count patterns
+    photo_patterns = [
+        r'(\d+)\s*Photo',                     # "25 Photo"
+        r'(\d+)\s*Photos',                    # "25 Photos"
+        r'(\d+)\s*Image',                     # "25 Image"
+        r'(\d+)\s*Images',                    # "25 Images"
+        r'Photos?\s*[:\-]?\s*(\d+)',          # "Photos: 25"
+    ]
+    
+    for pattern in photo_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                count = int(match.group(1))
+                if 0 <= count <= 200:  # Reasonable photo count
+                    return str(count)
+            except (ValueError, TypeError):
+                continue
+    
+    return 'Unknown'
+
+def extract_fence_from_card(card) -> str:
+    """Extract fence information from Redfin property card."""
+    card_text = card.get_text()
+    
+    # Look for fence patterns
+    fence_patterns = [
+        'Fenced Yard',
+        'Fenced',
+        'Privacy Fence',
+        'Chain Link Fence',
+        'Wood Fence',
+        'Vinyl Fence',
+        'Partial Fence',
+        'Fully Fenced',
+        'Back Yard Fenced',
+        'Front Yard Fenced'
+    ]
+    
+    found_fencing = []
+    for pattern in fence_patterns:
+        if re.search(rf'\b{re.escape(pattern)}\b', card_text, re.IGNORECASE):
+            found_fencing.append(pattern)
+    
+    if found_fencing:
+        return ', '.join(found_fencing[:2])  # Limit to first 2
+    
+    return 'Unknown'
+
 def fetch_redfin_properties() -> list[dict]:
     """Fetch Redfin properties from both Spokane City and County with enhanced data."""
     all_properties = []
@@ -641,7 +1305,33 @@ def fetch_redfin_properties() -> list[dict]:
                 days_on_market = extract_days_on_market_from_card(card)
                 garage_parking = extract_garage_parking_from_card(card)
                 
+                # Extract ALL NEW FIELDS for comprehensive data
+                mls_number = extract_mls_number_from_card(card)
+                hoa_fee = extract_hoa_fee_from_card(card)
+                property_taxes = extract_property_taxes_from_card(card)
+                stories = extract_stories_from_card(card)
+                basement = extract_basement_from_card(card)
+                heating_cooling = extract_heating_cooling_from_card(card)
+                flooring = extract_flooring_from_card(card)
+                appliances = extract_appliances_from_card(card)
+                fireplace = extract_fireplace_from_card(card)
+                pool_spa = extract_pool_spa_from_card(card)
+                view = extract_view_from_card(card)
+                listing_agent = extract_listing_agent_from_card(card)
+                listing_status = extract_listing_status_from_card(card)
+                price_per_sqft = extract_price_per_sqft_from_card(card)
+                school_district = extract_school_district_from_card(card)
+                utilities = extract_utilities_from_card(card)
+                neighborhood = extract_neighborhood_from_card(card)
+                open_house = extract_open_house_from_card(card)
+                previous_price = extract_previous_price_from_card(card)
+                walk_score = extract_walk_score_from_card(card)
+                monthly_payment = extract_monthly_payment_from_card(card)
+                photo_count = extract_photo_count_from_card(card)
+                fence = extract_fence_from_card(card)
+                
                 all_properties.append({
+                    # Original fields
                     'street': street,
                     'sqft': sqft,
                     'price': price,
@@ -653,7 +1343,32 @@ def fetch_redfin_properties() -> list[dict]:
                     'year_built': year_built,
                     'days_on_market': days_on_market,
                     'garage_parking': garage_parking,
-                    'source': source_name  # Track which source this came from
+                    'source': source_name,
+                    
+                    # NEW COMPREHENSIVE FIELDS
+                    'mls_number': mls_number,
+                    'hoa_fee': hoa_fee,
+                    'property_taxes': property_taxes,
+                    'stories': stories,
+                    'basement': basement,
+                    'heating_cooling': heating_cooling,
+                    'flooring': flooring,
+                    'appliances': appliances,
+                    'fireplace': fireplace,
+                    'pool_spa': pool_spa,
+                    'view': view,
+                    'listing_agent': listing_agent,
+                    'listing_status': listing_status,
+                    'price_per_sqft': price_per_sqft,
+                    'school_district': school_district,
+                    'utilities': utilities,
+                    'neighborhood': neighborhood,
+                    'open_house': open_house,
+                    'previous_price': previous_price,
+                    'walk_score': walk_score,
+                    'monthly_payment': monthly_payment,
+                    'photo_count': photo_count,
+                    'fence': fence
                 })
             
             logging.info("Found %d properties from %s", 
@@ -666,10 +1381,7 @@ def fetch_redfin_properties() -> list[dict]:
     logging.info("Total properties found: %d", len(all_properties))
     return all_properties
 
-def fetch_redfin_streets() -> list[str]:
-    """Legacy function - returns just street names for backwards compatibility."""
-    properties = fetch_redfin_properties()
-    return [prop['street'] for prop in properties]
+
 
 def arcgis_pid(street: str) -> str | None:
     """Get PID from SCOUT with robust error handling and retries."""
@@ -893,38 +1605,7 @@ def enhanced_kw_counts(text: str, sqft: int = 0) -> dict[str,int]:
     
     return counts
 
-def search_scout_ranch_properties(min_sqft: int = 1500) -> list[dict]:
-    """Stubbed: Ranch search is currently disabled."""
-    # Disabled ranch search functionality
-    # params = {
-    #     "f": "json",
-    #     "where": f"(legal_description LIKE '%RANCH%' OR site_address LIKE '%RANCH%' OR owner_name LIKE '%RANCH%') AND sqft > {min_sqft}",
-    #     "outFields": "PID_NUM,site_address,legal_description,sqft,owner_name",
-    #     "returnGeometry": "false",
-    #     "resultRecordCount": 1000  # Limit results
-    # }
-    # try:
-    #     response = requests.get(SCOUT_SEARCH_URL, params=params, timeout=30)
-    #     js = response.json()
-    #     features = js.get("features", [])
-    #     results = []
-    #     for feature in features:
-    #         attrs = feature.get("attributes", {})
-    #         results.append({
-    #             "pid": attrs.get("PID_NUM"),
-    #             "address": attrs.get("site_address"),
-    #             "legal_description": attrs.get("legal_description"),
-    #             "sqft": attrs.get("sqft"),
-    #             "owner_name": attrs.get("owner_name"),
-    #             "ranch_match_type": "Legal Desc" if "RANCH" in str(attrs.get("legal_description", "")).upper() else 
-    #                                "Address" if "RANCH" in str(attrs.get("site_address", "")).upper() else
-    #                                "Owner" if "RANCH" in str(attrs.get("owner_name", "")).upper() else "Other"
-    #         })
-    #     logging.info("Found %d Ranch properties >%d sqft", len(results), min_sqft)
-    #     return results
-    # except Exception as e:
-    #     logging.error("Error searching Scout for Ranch properties: %s", str(e))
-    return []
+
 
 def create_keyword_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Create a summary of only properties with non-zero keyword counts."""
@@ -1216,7 +1897,7 @@ def create_test_email_file(excel_path: Path, pdf_path: Path, stats_summary: dict
                 <div class="attachments">
                     <h4>📎 Attachments:</h4>
                     <ul>
-                        <li>📊 <span class="file">{excel_path.name}</span> - Excel file with 5 sheets: Raw Data, Keyword Summary, Keyword Stats, Lot Analysis, and Overview</li>
+                        <li>📊 <span class="file">{excel_path.name}</span> - Excel file with 6 sheets: Raw Data, All Redfin Fields (25+ property details), Keyword Summary, Keyword Stats, Lot Analysis, and Overview</li>
                         <li>📄 <span class="file">{pdf_path.name}</span> - PDF report with key findings and visualizations</li>
                     </ul>
                 </div>
@@ -1309,7 +1990,7 @@ def send_email(excel_path: Path, pdf_path: Path, stats_summary: dict, email_prov
         body = f"""
 Hello!
 
-Your Spokane real estate keyword analysis has completed successfully.
+Your Spokane real estate keyword analysis has completed successfully with comprehensive property data extraction.
 
 SUMMARY:
 • Total properties analyzed: {stats_summary.get('total_properties', 'N/A')}
@@ -1317,8 +1998,16 @@ SUMMARY:
 • Unique keywords found: {stats_summary.get('unique_keywords', 'N/A')}
 • Properties with lot numbers: {stats_summary.get('properties_with_lots', 'N/A')}
 
+NEW FEATURE: All Redfin Fields extracted including:
+• Basic info (price, sqft, beds/baths, year built)
+• Financial (HOA fees, property taxes, monthly payment)
+• Features (fireplace, pool, basement, stories)
+• Location (neighborhood, school district, utilities)
+• Marketing (listing agent, MLS number, photos)
+• And 20+ additional property details!
+
 Attachments:
-📊 Excel file with 5 sheets: Raw Data, Keyword Summary, Keyword Stats, Lot Analysis, and Overview
+📊 Excel file with 6 sheets: Raw Data, All Redfin Fields (25+ property details), Keyword Summary, Keyword Stats, Lot Analysis, and Overview
 📄 PDF report with key findings and visualizations
 
 Best regards,
@@ -1375,7 +2064,6 @@ def run_daily_report():
         test_email = False
         send_email = True  # Always send real emails in scheduled mode
         provider = 'gmail'
-        ranch_min_sqft = 1500
     
     args = MockArgs()
     
@@ -1386,11 +2074,7 @@ def run_daily_report():
     except Exception as e:
         logging.error("❌ Scheduled daily report failed: %s", str(e))
 
-def should_run_today():
-    """Check if we should run today (skip weekends if desired)."""
-    today = dt.datetime.now()
-    # Run Monday through Friday (0=Monday, 6=Sunday)
-    return today.weekday() < 5  # Skip weekends
+
 
 def run_scheduler():
     """Run the scheduling system."""
@@ -1550,10 +2234,7 @@ def run_main_logic(args):
 
     df = pd.DataFrame(rows)
     
-    # Search for Ranch properties automatically
-    logging.info("🏠 Searching for Ranch properties >%d sqft...", args.ranch_min_sqft)
-    ranch_results = search_scout_ranch_properties(args.ranch_min_sqft)
-    ranch_df = pd.DataFrame(ranch_results) if ranch_results else pd.DataFrame()
+
     
     batch_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = Path(f"scout_results_{batch_id}.xlsx")
@@ -1567,6 +2248,7 @@ def run_main_logic(args):
     # Create overview data
     overview_data = {
         'Total Properties Scraped': len(df),
+        'Total Redfin Fields Extracted': len([col for col in df.columns if col not in ['full_page_text', 'legal_description', 'pid'] + [f"L{i}" for i in range(100)] + KEYWORDS_BASE]),
         'Properties with Keywords': len(summary_df) if not summary_df.empty else 0,
         'Total Unique Keywords Found': len(stats_df) if not stats_df.empty else 0,
         'Most Common Keyword': stats_df.iloc[0]['keyword'] if not stats_df.empty else 'None',
@@ -1577,6 +2259,31 @@ def run_main_logic(args):
     with pd.ExcelWriter(out, engine='openpyxl') as writer:
         # Original detailed data
         df.to_excel(writer, sheet_name='Raw Data', index=False)
+        
+        # Create All Redfin Fields sheet with comprehensive property data
+        all_redfin_columns = [
+            'street', 'price', 'sqft', 'lot_size_acres', 'bedrooms', 'bathrooms', 
+            'property_type', 'year_built', 'days_on_market', 'post_date',
+            'mls_number', 'hoa_fee', 'property_taxes', 'stories', 'basement',
+            'heating_cooling', 'flooring', 'appliances', 'fireplace', 'pool_spa',
+            'view', 'listing_agent', 'listing_status', 'price_per_sqft',
+            'school_district', 'utilities', 'neighborhood', 'open_house',
+            'previous_price', 'walk_score', 'monthly_payment', 'photo_count',
+            'fence', 'garage_parking', 'source', 'jurisdiction'
+        ]
+        
+        # Select only the columns that exist in the dataframe
+        existing_columns = [col for col in all_redfin_columns if col in df.columns]
+        all_redfin_df = df[existing_columns].copy()
+        
+        # Reorder columns to put most important ones first
+        priority_columns = ['street', 'price', 'sqft', 'bedrooms', 'bathrooms', 'property_type', 'year_built', 'post_date']
+        other_columns = [col for col in existing_columns if col not in priority_columns]
+        ordered_columns = [col for col in priority_columns if col in existing_columns] + other_columns
+        
+        all_redfin_df = all_redfin_df[ordered_columns]
+        all_redfin_df.to_excel(writer, sheet_name='All Redfin Fields', index=False)
+        logging.info("Created All Redfin Fields sheet with %d properties and %d fields", len(all_redfin_df), len(ordered_columns))
         
         # Keyword Summary - only properties with matches
         if not summary_df.empty:
@@ -1593,10 +2300,7 @@ def run_main_logic(args):
             lot_df.to_excel(writer, sheet_name='Lot Analysis', index=False)
             logging.info("Created Lot Analysis with %d properties", len(lot_df))
         
-        # Ranch Properties - stubbed out for now
-        # if not ranch_df.empty:
-        #     ranch_df.to_excel(writer, sheet_name='Ranch Properties', index=False)
-        #     logging.info("Created Ranch Properties sheet with %d properties", len(ranch_df))
+
         
         # Overview sheet
         overview_df = pd.DataFrame(list(overview_data.items()), columns=['Metric', 'Value'])
@@ -1642,7 +2346,7 @@ def main():
     ap.add_argument("--send-email", action="store_true", help="force send real email (overrides test mode)")
     ap.add_argument("--provider", choices=['gmail', 'outlook', 'yahoo', 'aol'], default='gmail',
                     help="email provider to use (default: gmail)")
-    ap.add_argument("--ranch-min-sqft", type=int, default=1500, help="minimum square footage for Ranch search (default: 1500)")
+
     ap.add_argument("--schedule", action="store_true", help="run in scheduling mode - sends daily emails at 10am PST")
     args = ap.parse_args()
 
