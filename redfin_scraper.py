@@ -2310,8 +2310,24 @@ def run_main_logic(args):
     for jurisdiction, count in sorted(jurisdictions.items()):
         logging.info("  %s: %d properties", jurisdiction, count)
     
-    # Filter 1: Remove Spokane Valley properties
-    rows = [row for row in rows if 'VALLEY' not in row['jurisdiction'].upper() and 'VALLEY' not in row['source'].upper()]
+    # Filter 1: Remove Spokane Valley properties (check jurisdiction, source, AND street address)
+    def is_spokane_valley_property(row):
+        """Check if property is in Spokane Valley based on multiple criteria."""
+        # Check jurisdiction (from SCOUT data)
+        if 'VALLEY' in row['jurisdiction'].upper():
+            return True
+        
+        # Check source (which Redfin page it came from)
+        if 'VALLEY' in row['source'].upper():
+            return True
+            
+        # Check street address itself
+        if 'SPOKANE VALLEY' in row['street'].upper():
+            return True
+            
+        return False
+    
+    rows = [row for row in rows if not is_spokane_valley_property(row)]
     spokane_valley_removed = pre_filter_count - len(rows)
     if spokane_valley_removed > 0:
         logging.info("Removed %d Spokane Valley properties", spokane_valley_removed)
