@@ -54,7 +54,7 @@ from reportlab.lib import colors
 
 # ───── logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO,  # Normal logging level
     format="%(asctime)s %(levelname)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -63,9 +63,17 @@ logging.basicConfig(
 HDRS          = {"User-Agent": "Mozilla/5.0"}
 
 # Multiple Redfin URLs for different jurisdictions
+# Note: Spokane Valley will be filtered out later
+# Generate URLs for multiple pages of Spokane County results
+SPOKANE_COUNTY_BASE = "https://www.redfin.com/county/3100/WA/Spokane-County/filter/sort=lo-days"
 REDFIN_SOURCES = {
-    "Spokane City": "https://www.redfin.com/city/17154/WA/Spokane/filter/sort=lo-days",
-    "Spokane County": "https://www.redfin.com/county/3100/WA/Spokane-County/filter/sort=lo-days"
+    "Spokane County Page 1": SPOKANE_COUNTY_BASE,
+    "Spokane County Page 2": f"{SPOKANE_COUNTY_BASE}/page-2",
+    "Spokane County Page 3": f"{SPOKANE_COUNTY_BASE}/page-3",
+    "Spokane County Page 4": f"{SPOKANE_COUNTY_BASE}/page-4",
+    "Spokane County Page 5": f"{SPOKANE_COUNTY_BASE}/page-5",
+    "Spokane County Page 6": f"{SPOKANE_COUNTY_BASE}/page-6",
+    "Spokane County Page 7": f"{SPOKANE_COUNTY_BASE}/page-7"
 }
 
 SLUG_RE       = re.compile(r"/WA/Spokane/([^/]+)/home")
@@ -206,166 +214,190 @@ def extract_lot_size_from_card(card) -> float:
     
     return 0.0
 
-def extract_post_date_from_card(card) -> str:
-    """Extract post/listing date from Redfin property card."""
+def extract_post_date_from_card(card, show_raw_text=False) -> str:
+    """Extract post/listing date from Redfin property card with comprehensive debugging."""
     card_text = card.get_text()
     
-    # Debug: log some card text to see what we're working with
-    # logging.info("Card text sample: %s", card_text[:200])
+    # Show full card text when debug flag is enabled
+    if show_raw_text:
+        print(f"\n{'='*50}")
+        print(f"PROPERTY CARD RAW TEXT:")
+        print(f"{'='*50}")
+        print(card_text)
+        print(f"{'='*50}")
+        print(f"TEXT LENGTH: {len(card_text)} characters")
+        print(f"{'='*50}\n")
     
-    # Look for various Redfin date/time patterns
-    time_patterns = [
-        # Relative time patterns
-        r'(\d+)\s*HR\s*AGO',           # "1 HR AGO"
-        r'(\d+)\s*HRS\s*AGO',          # "17 HRS AGO" 
-        r'(\d+)\s*HOUR\s*AGO',         # "1 HOUR AGO"
-        r'(\d+)\s*HOURS\s*AGO',        # "17 HOURS AGO"
-        r'(\d+)\s*MIN\s*AGO',          # "30 MIN AGO"
-        r'(\d+)\s*MINS\s*AGO',         # "45 MINS AGO"
-        r'(\d+)\s*MINUTE\s*AGO',       # "1 MINUTE AGO"
-        r'(\d+)\s*MINUTES\s*AGO',      # "45 MINUTES AGO"
-        r'(\d+)\s*DAY\s*AGO',          # "1 DAY AGO"
-        r'(\d+)\s*DAYS\s*AGO',         # "3 DAYS AGO"
-        r'(\d+)\s*WEEK\s*AGO',         # "1 WEEK AGO"
-        r'(\d+)\s*WEEKS\s*AGO',        # "2 WEEKS AGO"
-        r'(\d+)\s*MONTH\s*AGO',        # "1 MONTH AGO"
-        r'(\d+)\s*MONTHS\s*AGO',       # "2 MONTHS AGO"
-        
-        # NEW prefix patterns
-        r'NEW\s+(\d+)\s*HR\s*AGO',     # "NEW 1 HR AGO"
-        r'NEW\s+(\d+)\s*HRS\s*AGO',    # "NEW 17 HRS AGO"
-        r'NEW\s+(\d+)\s*HOUR\s*AGO',   # "NEW 1 HOUR AGO"
-        r'NEW\s+(\d+)\s*HOURS\s*AGO',  # "NEW 17 HOURS AGO"
-        r'NEW\s+(\d+)\s*MIN\s*AGO',    # "NEW 30 MIN AGO"
-        r'NEW\s+(\d+)\s*MINS\s*AGO',   # "NEW 45 MINS AGO"
-        r'NEW\s+(\d+)\s*MINUTE\s*AGO', # "NEW 1 MINUTE AGO"
-        r'NEW\s+(\d+)\s*MINUTES\s*AGO',# "NEW 45 MINUTES AGO"
-        r'NEW\s+(\d+)\s*DAY\s*AGO',    # "NEW 1 DAY AGO"
-        r'NEW\s+(\d+)\s*DAYS\s*AGO',   # "NEW 3 DAYS AGO"
-        r'NEW\s+(\d+)\s*WEEK\s*AGO',   # "NEW 1 WEEK AGO"
-        r'NEW\s+(\d+)\s*WEEKS\s*AGO',  # "NEW 2 WEEKS AGO"
-        r'NEW\s+(\d+)\s*MONTH\s*AGO',  # "NEW 1 MONTH AGO"
-        r'NEW\s+(\d+)\s*MONTHS\s*AGO', # "NEW 2 MONTHS AGO"
-        
-        # Simple "NEW" indicators (treat as today)
-        r'\bNEW\b',                    # Just "NEW" by itself
-        r'NEW\s+LISTING',              # "NEW LISTING"
-        r'JUST\s+LISTED',              # "JUST LISTED"
-        r'PRICE\s+IMPROVEMENT',        # "PRICE IMPROVEMENT"
+    # Look for "days on Redfin" or "days on market" first - this is most reliable
+    days_patterns = [
+        r'(\d+)\s+days?\s+on\s+Redfin',        # "5 days on Redfin"
+        r'(\d+)\s+days?\s+on\s+market',        # "5 days on market"  
+        r'(\d+)\s+day\s+on\s+Redfin',          # "1 day on Redfin"
+        r'(\d+)\s+day\s+on\s+market',          # "1 day on market"
+        r'On\s+Redfin\s+(\d+)\s+days?',        # "On Redfin 5 days"
+        r'On\s+market\s+(\d+)\s+days?',        # "On market 5 days"
     ]
     
-    for pattern in time_patterns:
+    for pattern in days_patterns:
+        match = re.search(pattern, card_text, re.IGNORECASE)
+        if match:
+            try:
+                days_ago = int(match.group(1))
+                if 0 <= days_ago <= 365:  # Reasonable range
+                    post_date = dt.datetime.now() - dt.timedelta(days=days_ago)
+                    result = post_date.strftime('%m/%d/%Y')
+                    logging.info("Found days pattern: %s -> %d days ago -> %s", match.group(0), days_ago, result)
+                    return result
+            except (ValueError, TypeError):
+                continue
+    
+    # Look for status badges like "NEW TODAY", "NEW 2 HOURS AGO" etc. 
+    # These are common on Redfin - be aggressive to catch edge cases
+    status_patterns = [
+        r'NEW\s+TODAY',                         # "NEW TODAY"
+        r'NEW\s+(\d+)\s+HOURS?\s+AGO',         # "NEW 2 HOURS AGO"
+        r'NEW\s+(\d+)\s+HRS?\s+AGO',           # "NEW 2 HRS AGO"  
+        r'NEW\s+(\d+)\s+HOUR\s+AGO',           # "NEW 1 HOUR AGO"
+        r'NEW\s+(\d+)\s+MINUTES?\s+AGO',       # "NEW 30 MINUTES AGO"
+        r'NEW\s+(\d+)\s+MINS?\s+AGO',          # "NEW 30 MINS AGO"
+        r'NEW\s+(\d+)\s+MIN\s+AGO',            # "NEW 6 MIN AGO"
+        r'NEW\s+(\d+)\s+DAYS?\s+AGO',          # "NEW 3 DAYS AGO"
+        r'NEW\s+(\d+)\s+DAY\s+AGO',            # "NEW 1 DAY AGO"
+        r'NEW\s+YESTERDAY',                     # "NEW YESTERDAY"
+        r'NEW\s+A\s+FEW\s+MINUTES?\s+AGO',     # "NEW A FEW MINUTES AGO"
+        r'LISTED\s+TODAY',                      # "LISTED TODAY"
+        r'LISTED\s+(\d+)\s+DAYS?\s+AGO',       # "LISTED 2 DAYS AGO"
+        r'LISTED\s+YESTERDAY',                  # "LISTED YESTERDAY"
+        r'JUST\s+LISTED',                       # "JUST LISTED" 
+        r'RECENTLY\s+LISTED',                   # "RECENTLY LISTED"
+    ]
+    
+    for pattern in status_patterns:
         match = re.search(pattern, card_text, re.IGNORECASE)
         if match:
             try:
                 now = dt.datetime.now()
+                matched_text = match.group(0)
                 
-                # Handle simple "NEW" without numbers
-                if pattern in [r'\bNEW\b', r'NEW\s+LISTING', r'JUST\s+LISTED', r'PRICE\s+IMPROVEMENT']:
-                    return now.strftime('%m/%d/%Y')
-                
-                time_value = int(match.group(1))
-                
-                # Determine the time unit and calculate the post date
-                if 'HR' in pattern or 'HOUR' in pattern:
-                    post_datetime = now - dt.timedelta(hours=time_value)
-                elif 'MIN' in pattern:
-                    post_datetime = now - dt.timedelta(minutes=time_value)
-                elif 'DAY' in pattern:
-                    post_datetime = now - dt.timedelta(days=time_value)
-                elif 'WEEK' in pattern:
-                    post_datetime = now - dt.timedelta(weeks=time_value)
-                elif 'MONTH' in pattern:
-                    post_datetime = now - dt.timedelta(days=time_value * 30)  # Approximate
-                else:
-                    continue
-                
-                # Return just the calendar date (no time)
-                return post_datetime.strftime('%m/%d/%Y')
-                
+                if 'TODAY' in matched_text.upper():
+                    result = now.strftime('%m/%d/%Y')
+                    logging.info("Found status pattern: %s -> today -> %s", matched_text, result)
+                    return result
+                elif 'YESTERDAY' in matched_text.upper():
+                    result = (now - dt.timedelta(days=1)).strftime('%m/%d/%Y')
+                    logging.debug("Found status pattern: %s -> yesterday -> %s", matched_text, result)
+                    return result
+                elif 'JUST LISTED' in matched_text.upper() or 'RECENTLY LISTED' in matched_text.upper() or 'A FEW MINUTES' in matched_text.upper():
+                    result = now.strftime('%m/%d/%Y')
+                    logging.debug("Found status pattern: %s -> today -> %s", matched_text, result)
+                    return result
+                elif match.groups():
+                    time_value = int(match.group(1))
+                    if 'HOUR' in matched_text.upper() or 'HR' in matched_text.upper():
+                        if time_value <= 24:  # Same day
+                            result = now.strftime('%m/%d/%Y')
+                            logging.debug("Found status pattern: %s -> %d hours ago (same day) -> %s", matched_text, time_value, result)
+                            return result
+                    elif 'MIN' in matched_text.upper():
+                        result = now.strftime('%m/%d/%Y')  # Same day
+                        logging.debug("Found status pattern: %s -> %d minutes ago (same day) -> %s", matched_text, time_value, result)
+                        return result
+                    elif 'DAY' in matched_text.upper():
+                        if time_value <= 30:  # Reasonable range
+                            post_date = now - dt.timedelta(days=time_value)
+                            result = post_date.strftime('%m/%d/%Y')
+                            logging.debug("Found status pattern: %s -> %d days ago -> %s", matched_text, time_value, result)
+                            return result
             except (ValueError, TypeError, IndexError):
                 continue
     
-    # Look for explicit date formats
-    date_patterns = [
-        # Standard US date formats
-        r'(\d{1,2}/\d{1,2}/\d{4})',              # "12/25/2024"
-        r'(\d{1,2}-\d{1,2}-\d{4})',              # "12-25-2024"
-        r'(\d{4}-\d{1,2}-\d{1,2})',              # "2024-12-25"
-        
-        # With context
-        r'Posted:?\s*(\d{1,2}/\d{1,2}/\d{4})',   # "Posted: 12/25/2024"
-        r'Listed:?\s*(\d{1,2}/\d{1,2}/\d{4})',   # "Listed: 12/25/2024"
-        r'Added:?\s*(\d{1,2}/\d{1,2}/\d{4})',    # "Added: 12/25/2024"
-        r'Date:?\s*(\d{1,2}/\d{1,2}/\d{4})',     # "Date: 12/25/2024"
-        
-        # Month names
-        r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),?\s+(\d{4})',  # "Jan 15, 2024"
-        r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})',     # "15 Jan 2024"
+    # Look for explicit dates in various formats
+    explicit_date_patterns = [
+        r'Listed\s+(\d{1,2}/\d{1,2}/\d{4})',         # "Listed 12/25/2024"
+        r'Posted\s+(\d{1,2}/\d{1,2}/\d{4})',         # "Posted 12/25/2024"
+        r'Added\s+(\d{1,2}/\d{1,2}/\d{4})',          # "Added 12/25/2024"
+        r'(\d{1,2}/\d{1,2}/\d{4})',                  # Just "12/25/2024"
+        r'(\d{1,2}-\d{1,2}-\d{4})',                  # "12-25-2024"
+        r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),?\s+(\d{4})',  # "Dec 25, 2024"
     ]
     
-    for pattern in date_patterns:
+    for pattern in explicit_date_patterns:
         match = re.search(pattern, card_text, re.IGNORECASE)
         if match:
             try:
                 if len(match.groups()) == 1:
-                    # Simple date format
                     date_str = match.group(1)
-                    # Validate the date isn't in the future
-                    try:
-                        parsed_date = dt.datetime.strptime(date_str, '%m/%d/%Y')
-                        if parsed_date <= dt.datetime.now():
-                            return date_str
-                    except ValueError:
+                    # Try different date formats
+                    for date_format in ['%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d']:
                         try:
-                            parsed_date = dt.datetime.strptime(date_str, '%m-%d-%Y')
-                            if parsed_date <= dt.datetime.now():
-                                return parsed_date.strftime('%m/%d/%Y')
+                            parsed_date = dt.datetime.strptime(date_str, date_format)
+                            # Only accept dates from the past year
+                            if (dt.datetime.now() - parsed_date).days <= 365 and parsed_date <= dt.datetime.now():
+                                result = parsed_date.strftime('%m/%d/%Y')
+                                logging.debug("Found explicit date: %s -> %s", date_str, result)
+                                return result
                         except ValueError:
-                            try:
-                                parsed_date = dt.datetime.strptime(date_str, '%Y-%m-%d')
-                                if parsed_date <= dt.datetime.now():
-                                    return parsed_date.strftime('%m/%d/%Y')
-                            except ValueError:
-                                continue
+                            continue
                 elif len(match.groups()) == 3:
                     # Month name format
                     month_name, day, year = match.groups()
-                    if month_name.upper() in ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
-                                            'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']:
-                        try:
-                            month_num = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
-                                       'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'].index(month_name.upper()) + 1
-                            parsed_date = dt.datetime(int(year), month_num, int(day))
-                            if parsed_date <= dt.datetime.now():
-                                return parsed_date.strftime('%m/%d/%Y')
-                        except (ValueError, IndexError):
-                            continue
+                    month_names = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+                                 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+                    try:
+                        month_num = month_names.index(month_name.upper()) + 1
+                        parsed_date = dt.datetime(int(year), month_num, int(day))
+                        if (dt.datetime.now() - parsed_date).days <= 365 and parsed_date <= dt.datetime.now():
+                            result = parsed_date.strftime('%m/%d/%Y')
+                            logging.debug("Found month name date: %s %s %s -> %s", month_name, day, year, result)
+                            return result
+                    except (ValueError, IndexError):
+                        continue
             except (ValueError, TypeError, IndexError):
                 continue
     
-    # Look for "Today", "Yesterday" etc.
-    relative_date_patterns = [
-        r'\bTODAY\b',
-        r'\bYESTERDAY\b',
-        r'THIS\s+WEEK',
-        r'LAST\s+WEEK'
+    # Last resort: Look for any time indicators that suggest recency
+    recency_indicators = [
+        r'\bNEW\b',
+        r'\bJUST\s+LISTED\b',
+        r'\bRECENTLY\s+LISTED\b',
+        r'\bFRESH\s+LISTING\b',
+        r'\bPRICE\s+IMPROVEMENT\b',
+        r'\bPRICE\s+REDUCED\b',
+        r'\bBACK\s+ON\s+MARKET\b'
     ]
     
-    for pattern in relative_date_patterns:
+    for pattern in recency_indicators:
         if re.search(pattern, card_text, re.IGNORECASE):
-            now = dt.datetime.now()
-            if 'TODAY' in pattern:
-                return now.strftime('%m/%d/%Y')
-            elif 'YESTERDAY' in pattern:
-                return (now - dt.timedelta(days=1)).strftime('%m/%d/%Y')
-            elif 'THIS WEEK' in pattern:
-                return (now - dt.timedelta(days=3)).strftime('%m/%d/%Y')  # Rough estimate
-            elif 'LAST WEEK' in pattern:
-                return (now - dt.timedelta(days=7)).strftime('%m/%d/%Y')
+            result = dt.datetime.now().strftime('%m/%d/%Y')
+            logging.debug("Found recency indicator: %s -> today -> %s", pattern, result)
+            return result
     
-    # Default fallback: assume listing posted today when no patterns matched
-    return dt.datetime.now().strftime('%m/%d/%Y')
+    # DEBUGGING: Log when we fall back to unknown  
+    logging.debug("No date pattern matched for property. This is normal for older listings.")
+    logging.debug("Card text length: %d characters", len(card_text))
+    return "Unknown"  # Don't assume today's date if we can't find anything
+
+def clean_date_string(date_str: str) -> str:
+    """Clean up date string by removing unwanted characters."""
+    if not date_str or date_str == "Unknown":
+        return date_str
+    
+    # Remove common unwanted characters
+    cleaned = date_str.strip()
+    cleaned = re.sub(r'[^\d/\-]', '', cleaned)  # Keep only digits, /, and -
+    
+    # Validate the format
+    if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', cleaned):
+        return cleaned
+    elif re.match(r'^\d{1,2}-\d{1,2}-\d{4}$', cleaned):
+        # Convert to MM/DD/YYYY format
+        try:
+            parsed = dt.datetime.strptime(cleaned, '%m-%d-%Y')
+            return parsed.strftime('%m/%d/%Y')
+        except ValueError:
+            pass
+    
+    return "Unknown"
 
 def extract_bedrooms_from_card(card) -> int:
     """Extract number of bedrooms from Redfin property card."""
@@ -1295,7 +1327,15 @@ def fetch_redfin_properties() -> list[dict]:
                 # Extract new data fields
                 price = extract_price_from_card(card)
                 lot_size_acres = extract_lot_size_from_card(card)
-                post_date = extract_post_date_from_card(card)
+                post_date = clean_date_string(extract_post_date_from_card(card, args.show_raw_text))
+                
+                # In raw text mode, skip the rest of processing for this property
+                if args.show_raw_text:
+                    # Show only first 5 properties by default in raw text mode
+                    if i >= 5:
+                        print(f"\n✅ Shown first 5 properties. Use --limit to see more.")
+                        return
+                    continue
                 
                 # Extract additional property details
                 bedrooms = extract_bedrooms_from_card(card)
@@ -1656,7 +1696,7 @@ def create_keyword_stats(df: pd.DataFrame) -> pd.DataFrame:
     return stats_df
 
 def create_lot_analysis(df: pd.DataFrame) -> pd.DataFrame:
-    """Create analysis specifically for L0-L99 lot keywords."""
+    """Create analysis specifically for L0-L99 lot keywords with enhanced property details."""
     lot_cols = [f"L{i}" for i in range(100)]
     existing_lot_cols = [col for col in lot_cols if col in df.columns]
     
@@ -1670,9 +1710,17 @@ def create_lot_analysis(df: pd.DataFrame) -> pd.DataFrame:
                 total_lots += row[lot_col]
         
         if lot_matches:  # Only include properties with lot matches
+            # Format price nicely
+            price_str = f"${row['price']:,}" if row['price'] > 0 else "N/A"
+            # Format acres with 3 decimal places
+            acres_str = f"{row['lot_size_acres']:.3f}" if row['lot_size_acres'] > 0 else "N/A"
+            
             analysis.append({
                 'street': row['street'],
                 'pid': row['pid'],
+                'price': price_str,
+                'acres': acres_str,
+                'legal_description': row['legal_description'][:150] + '...' if len(row['legal_description']) > 150 else row['legal_description'],
                 'total_lot_references': total_lots,
                 'lot_numbers_found': ', '.join(lot_matches),
                 'unique_lots_count': len(lot_matches)
@@ -1892,6 +1940,13 @@ def create_test_email_file(excel_path: Path, pdf_path: Path, stats_summary: dict
                         <li>• Unique keywords found: {stats_summary.get('unique_keywords', 'N/A')}</li>
                         <li>• Properties with lot numbers: {stats_summary.get('properties_with_lots', 'N/A')}</li>
                     </ul>
+                    
+                    <h4>📖 FEATURE EXPLANATIONS:</h4>
+                    <p><strong>📋 Keyword Summary:</strong> Shows only properties that contain specific keywords in their legal descriptions. Keywords include lot references (L1, L2, etc.), lot-related terms (LT, LTS, LOTS, THRU, TO), and subdivision indicators. This helps identify multi-lot properties or lots that can be subdivided.</p>
+                    
+                    <p><strong>📊 Keyword Stats:</strong> Provides aggregate statistics showing how frequently each keyword appears across all properties. Shows total occurrences, number of properties containing each keyword, and maximum occurrences in a single property. This helps identify the most common lot patterns in your market.</p>
+                    
+                    <p><strong>🏠 Lot Analysis:</strong> Focuses specifically on L0-L99 lot number references (like "L1", "L15", etc.). Shows which properties reference specific lot numbers and how many unique lots each property contains. This is crucial for identifying subdivision opportunities and understanding lot configurations.</p>
                 </div>
                 
                 <div class="attachments">
@@ -1998,6 +2053,21 @@ SUMMARY:
 • Unique keywords found: {stats_summary.get('unique_keywords', 'N/A')}
 • Properties with lot numbers: {stats_summary.get('properties_with_lots', 'N/A')}
 
+NEW BOSS REQUIREMENTS IMPLEMENTED:
+✅ Added Spokane County listings (in addition to City of Spokane)
+✅ Filtered OUT all Spokane Valley properties 
+✅ Only includes properties with lots > 0.25 acres
+✅ Sorted by date (newest listings first)
+✅ Enhanced date extraction from Redfin
+
+FEATURE EXPLANATIONS:
+
+📋 KEYWORD SUMMARY: Shows only properties that contain specific keywords in their legal descriptions. Keywords include lot references (L1, L2, etc.), lot-related terms (LT, LTS, LOTS, THRU, TO), and subdivision indicators. This helps identify multi-lot properties or lots that can be subdivided.
+
+📊 KEYWORD STATS: Provides aggregate statistics showing how frequently each keyword appears across all properties. Shows total occurrences, number of properties containing each keyword, and maximum occurrences in a single property. This helps identify the most common lot patterns in your market.
+
+🏠 LOT ANALYSIS: Focuses specifically on L0-L99 lot number references (like "L1", "L15", etc.). Shows which properties reference specific lot numbers and how many unique lots each property contains. This is crucial for identifying subdivision opportunities and understanding lot configurations.
+
 NEW FEATURE: All Redfin Fields extracted including:
 • Basic info (price, sqft, beds/baths, year built)
 • Financial (HOA fees, property taxes, monthly payment)
@@ -2054,8 +2124,8 @@ Your Real Estate Bot Assistant 🏠
         return False
 
 def run_daily_report():
-    """Run the daily report generation and email sending."""
-    logging.info("🕙 Running scheduled daily report at 10am PST...")
+    """Run the report generation and email sending (scheduled every 3 days)."""
+    logging.info("🕙 Running scheduled report at 10am PST...")
     
     # Create a mock args object for scheduled runs
     class MockArgs:
@@ -2082,11 +2152,11 @@ def run_scheduler():
     pst = pytz.timezone('US/Pacific')
     
     logging.info("🕐 Starting email automation scheduler...")
-    logging.info("📅 Daily reports will be sent at 10:00 AM PST (Monday-Friday)")
+    logging.info("📅 Reports will be sent every 3 days at 10:00 AM PST")
     logging.info("⏸️  Press Ctrl+C to stop the scheduler")
     
-    # Schedule daily at 10 AM PST
-    schedule.every().day.at("10:00").do(run_daily_report)
+    # Schedule to run every 3 days at 10 AM PST
+    schedule.every(3).days.at("10:00").do(run_daily_report)
     
     try:
         while True:
@@ -2107,6 +2177,14 @@ def run_scheduler():
 
 def run_main_logic(args):
     """Extract the main logic so it can be called by both CLI and scheduler."""
+    
+    # Special mode: Just show raw text without other logging
+    if args.show_raw_text:
+        print("🔍 RAW TEXT DEBUG MODE - Showing full card text from each property")
+        print("=" * 80)
+        # Suppress most logging for clean output
+        logging.getLogger().setLevel(logging.WARNING)
+    
     # Fetch Redfin properties with enhanced data
     properties = fetch_redfin_properties()
     if args.limit:
@@ -2118,6 +2196,9 @@ def run_main_logic(args):
     failed_count = 0
     
     for i, prop in enumerate(properties,1):
+        if args.show_raw_text:
+            print(f"\n🏠 PROPERTY #{i}: {prop['street']}")
+            print(f"   Source: {prop['source']} | Price: ${prop['price']:,}" if prop['price'] > 0 else f"   Source: {prop['source']} | Price: N/A")
         street = prop['street']
         redfin_sqft = prop['sqft']
         price = prop['price']
@@ -2215,6 +2296,33 @@ def run_main_logic(args):
             
         time.sleep(0.3)   # polite throttle
     
+    # APPLY BOSS'S FILTERS BEFORE FINALIZING
+    logging.info("═══ APPLYING BOSS'S FILTERS ═══")
+    pre_filter_count = len(rows)
+    
+    # Log jurisdictions found before filtering
+    jurisdictions = {}
+    for row in rows:
+        jurisdiction = row['jurisdiction']
+        jurisdictions[jurisdiction] = jurisdictions.get(jurisdiction, 0) + 1
+    
+    logging.info("Jurisdictions found before filtering:")
+    for jurisdiction, count in sorted(jurisdictions.items()):
+        logging.info("  %s: %d properties", jurisdiction, count)
+    
+    # Filter 1: Remove Spokane Valley properties
+    rows = [row for row in rows if 'VALLEY' not in row['jurisdiction'].upper() and 'VALLEY' not in row['source'].upper()]
+    spokane_valley_removed = pre_filter_count - len(rows)
+    if spokane_valley_removed > 0:
+        logging.info("Removed %d Spokane Valley properties", spokane_valley_removed)
+    
+    # Filter 2: Only keep properties > 0.25 acres
+    pre_acreage_count = len(rows)
+    rows = [row for row in rows if row['lot_size_acres'] > 0.25]
+    small_lots_removed = pre_acreage_count - len(rows)
+    if small_lots_removed > 0:
+        logging.info("Removed %d properties with lots <= 0.25 acres", small_lots_removed)
+    
     # Summary logging
     total_processed = len(properties)
     successful = len(rows)
@@ -2226,6 +2334,11 @@ def run_main_logic(args):
         logging.info("Failed (network/timeout): %d", failed_count)
     if skipped_count > 0:
         logging.info("Skipped (short/long plat): %d", skipped_count)
+    if spokane_valley_removed > 0:
+        logging.info("Filtered out (Spokane Valley): %d", spokane_valley_removed)
+    if small_lots_removed > 0:
+        logging.info("Filtered out (lots <= 0.25 acres): %d", small_lots_removed)
+    logging.info("Final count after filters: %d", successful)
     logging.info("Success rate: %.1f%%", (successful / total_processed * 100) if total_processed > 0 else 0)
 
     if not rows:
@@ -2233,6 +2346,27 @@ def run_main_logic(args):
         return  # Don't sys.exit() in scheduler mode
 
     df = pd.DataFrame(rows)
+    
+    # SORT BY DATE - newest listings first
+    logging.info("═══ SORTING BY DATE ═══")
+    # Convert post_date to datetime for proper sorting
+    def parse_date(date_str):
+        if not date_str or date_str == '':
+            return dt.datetime.min  # Put unknown dates at the end
+        try:
+            return dt.datetime.strptime(date_str, '%m/%d/%Y')
+        except:
+            return dt.datetime.min  # Fallback for invalid dates
+    
+    df['post_date_parsed'] = df['post_date'].apply(parse_date)
+    df = df.sort_values(['post_date_parsed'], ascending=[False])  # Newest first
+    df = df.drop('post_date_parsed', axis=1)  # Remove temp column
+    
+    logging.info("Properties sorted by date - newest listings first")
+    if len(df) > 0:
+        newest_date = df.iloc[0]['post_date'] if df.iloc[0]['post_date'] else 'Unknown'
+        oldest_date = df.iloc[-1]['post_date'] if df.iloc[-1]['post_date'] else 'Unknown'
+        logging.info("Date range: %s (newest) to %s (oldest)", newest_date, oldest_date)
     
 
     
@@ -2348,6 +2482,7 @@ def main():
                     help="email provider to use (default: gmail)")
 
     ap.add_argument("--schedule", action="store_true", help="run in scheduling mode - sends daily emails at 10am PST")
+    ap.add_argument("--show-raw-text", action="store_true", help="debug mode: show full raw text that code sees from each property card")
     args = ap.parse_args()
 
     # Check if running in scheduler mode

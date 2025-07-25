@@ -2,8 +2,8 @@ name: Redfin Spokane Real Estate Scraper
 
 on:
   schedule:
-    # Run every 24 hours at 8 AM PST (16:00 UTC)
-    - cron: '0 16 * * *'
+    # Run every 3 days at 8 AM PST (16:00 UTC) - Monday, Thursday, Sunday
+    - cron: '0 16 * * 1,4,0'
   workflow_dispatch: # Allow manual triggering
 
 jobs:
